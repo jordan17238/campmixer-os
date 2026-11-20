@@ -1,0 +1,6 @@
+__pycache__/
+.venv/
+image/build/
+image/config
+*.img.xz
+*.img.xz.sha256

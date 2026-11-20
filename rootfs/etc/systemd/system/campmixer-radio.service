@@ -1,0 +1,17 @@
+[Unit]
+Description=CampMixer Wi-Fi: join a listed network or run its own
+Documentation=file:/opt/campmixer/netconf.py
+After=NetworkManager.service campmixer-netconf.service
+Wants=NetworkManager.service
+ConditionPathExists=/opt/campmixer/netconf.py
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/campmixer/netconf.py radio
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

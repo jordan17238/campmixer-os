@@ -1,0 +1,15 @@
+[Unit]
+Description=CampMixer network settings from /boot/firmware/campmixer.txt
+Documentation=file:/opt/campmixer/netconf.py
+RequiresMountsFor=/boot/firmware
+Before=NetworkManager.service
+ConditionPathExists=/opt/campmixer/netconf.py
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/python3 /opt/campmixer/netconf.py apply
+TimeoutStartSec=45
+
+[Install]
+WantedBy=multi-user.target

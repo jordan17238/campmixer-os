@@ -1,0 +1,25 @@
+[Unit]
+Description=CampMixer bridge: serial link to the mixer core, web app for phones
+Documentation=file:/opt/campmixer/bridge.py
+After=network.target
+ConditionPathExists=/opt/campmixer/bridge.py
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=campmixer
+Group=campmixer
+SupplementaryGroups=dialout
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+ExecStart=/usr/bin/python3 /opt/campmixer/bridge.py --port 80 --serial /dev/serial0
+Restart=always
+RestartSec=1
+WatchdogSec=15
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

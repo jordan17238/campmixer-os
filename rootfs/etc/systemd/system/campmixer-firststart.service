@@ -1,0 +1,12 @@
+[Unit]
+Description=CampMixer: first-start set-up of a freshly written image (passwords, then lock the card)
+ConditionPathExists=/var/lib/campmixer/first-start
+RequiresMountsFor=/boot/firmware
+
+[Service]
+# Not a oneshot: the script waits for the rest of the start-up to finish, so it must not hold it up.
+Type=exec
+ExecStart=/usr/local/sbin/campmixer firststart
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,33 @@
+# Builds CampMixer OS on GitHub's machines and publishes the image under Releases.
+# The steps themselves live in ci/, so they can change without touching this file.
+name: Build CampMixer OS
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    paths-ignore: ["**.md"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    # An ARM machine, the same kind of processor as the Pi, so nothing has to be emulated.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v6
+      - name: Checks
+        run: bash ci/checks.sh
+      - name: Build the image
+        run: bash ci/build.sh
+      - name: Publish under Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: bash ci/publish.sh

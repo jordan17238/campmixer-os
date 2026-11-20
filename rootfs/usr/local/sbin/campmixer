@@ -1,0 +1,252 @@
+#!/bin/bash
+# campmixer: look after the CampMixer Pi.
+set -u
+
+APP=/opt/campmixer
+BOOT=/boot/firmware
+NETCONF="$APP/netconf.py"
+VERSION="$(cat "$APP/VERSION" 2>/dev/null || echo unknown)"
+
+usage() {
+	cat <<'EOF'
+campmixer status                        what the Pi is doing right now
+campmixer wifi                          Wi-Fi settings in use (sudo shows the passwords)
+campmixer wifi own --name NAME --password PASSWORD [--band 2.4|5] [--channel N]
+                                        change the mixer's own Wi-Fi network
+campmixer wifi join NAME [PASSWORD]     join this Wi-Fi network whenever it is in range
+campmixer wifi forget NAME              stop joining it
+campmixer password                      change your login password (card must be unlocked)
+campmixer lock                          make the card read-only, so the power can be pulled at any time
+campmixer unlock                        make the card writable again, for changes and updates
+campmixer logs                          recent messages from the CampMixer services
+campmixer version
+EOF
+}
+
+die() {
+	echo "$*" >&2
+	exit 1
+}
+
+need_root() {
+	[ "$(id -u)" -eq 0 ] || die "Run this with sudo."
+}
+
+locked_now() {
+	grep -q "overlayroot=tmpfs" /proc/cmdline
+}
+
+locked_next() {
+	grep -q "overlayroot=tmpfs" "$BOOT/cmdline.txt" 2>/dev/null
+}
+
+cmd_status() {
+	local model storage dev type state conn stations found=0
+	model="$(tr -d '\0' </proc/device-tree/model 2>/dev/null || echo "unknown computer")"
+	echo "CampMixer OS $VERSION on $(hostname) ($model)"
+
+	if locked_now; then
+		storage="locked, safe to pull the power"
+		locked_next || storage="$storage (unlocks at the next restart)"
+	else
+		storage="unlocked, changes are kept"
+		locked_next && storage="$storage (locks at the next restart)"
+	fi
+	echo "Storage:   $storage"
+
+	if command -v nmcli >/dev/null 2>&1; then
+		while IFS=: read -r dev type state conn; do
+			[ "$type" = wifi ] || continue
+			found=1
+			case "$state:$conn" in
+			unmanaged:*)
+				echo "Wi-Fi:     $dev is not used"
+				;;
+			connected:campmixer-ap)
+				stations="?"
+				command -v iw >/dev/null 2>&1 && stations="$(iw dev "$dev" station dump 2>/dev/null | grep -c '^Station')"
+				echo "Wi-Fi:     own network on $dev, $stations connected"
+				;;
+			connected:campmixer-join-*)
+				echo "Wi-Fi:     joined $(iw dev "$dev" link 2>/dev/null | sed -n 's/^[[:space:]]*SSID: //p') on $dev"
+				;;
+			*)
+				echo "Wi-Fi:     $dev is $state"
+				;;
+			esac
+		done < <(LC_ALL=C nmcli -t -f DEVICE,TYPE,STATE,CONNECTION device status 2>/dev/null)
+	fi
+	[ "$found" -eq 1 ] || echo "Wi-Fi:     no radio found"
+
+	echo "Addresses: $(ip -4 -o addr show 2>/dev/null | awk '$2 != "lo" {split($4, a, "/"); printf "%s (%s)  ", a[1], $2}')"
+
+	if systemctl is-active --quiet campmixer-bridge.service; then
+		echo "Bridge:    running, $(curl -s --max-time 2 http://127.0.0.1/api/status 2>/dev/null | python3 -c '
+import json, sys
+try:
+    link = json.load(sys.stdin)["link"]
+    if not link["open"]:
+        print("serial port not available (%s)" % link["error"])
+    elif link["up"]:
+        print("mixer core connected")
+    else:
+        print("no signal from the mixer core")
+except Exception:
+    print("no status report")
+')"
+	else
+		echo "Bridge:    not running. See: campmixer logs"
+	fi
+}
+
+reload_wifi() {
+	systemctl is-active --quiet NetworkManager.service || return 0
+	nmcli general reload >/dev/null 2>&1
+	nmcli connection reload >/dev/null 2>&1
+	echo "Wi-Fi restarts now with the new settings. If you are connected through it, reconnect in about 30 seconds."
+	if [ "$1" = own ] && LC_ALL=C nmcli -t -f TYPE,STATE,CONNECTION device status 2>/dev/null | grep -q '^wifi:connected:campmixer-ap$'; then
+		nohup nmcli --wait 30 connection up id campmixer-ap >/dev/null 2>&1 &
+	else
+		systemctl restart --no-block campmixer-radio.service
+	fi
+}
+
+cmd_wifi() {
+	local action="${1:-}" pairs=()
+	[ $# -gt 0 ] && shift
+	case "$action" in
+	"")
+		if [ "$(id -u)" -eq 0 ]; then python3 "$NETCONF" show --passwords; else python3 "$NETCONF" show; fi
+		;;
+	own)
+		need_root
+		local band="" channel=""
+		while [ $# -gt 0 ]; do
+			[ $# -ge 2 ] || die "$1 needs a value."
+			case "$1" in
+			--name) pairs+=("WIFI_NAME=$2") ;;
+			--password) pairs+=("WIFI_PASSWORD=$2") ;;
+			--band) band="$2" ;;
+			--channel) channel="$2" ;;
+			*) die "Not an option: $1" ;;
+			esac
+			shift 2
+		done
+		# A new band without a channel gets that band's usual channel.
+		[ -z "$band" ] || pairs+=("WIFI_BAND=$band" "WIFI_CHANNEL=$channel")
+		[ -n "$band" ] || [ -z "$channel" ] || pairs+=("WIFI_CHANNEL=$channel")
+		[ "${#pairs[@]}" -gt 0 ] || die "Nothing to change. See: campmixer"
+		python3 "$NETCONF" set "${pairs[@]}" || exit $?
+		reload_wifi own
+		;;
+	join)
+		need_root
+		[ $# -ge 1 ] && [ $# -le 2 ] || die "Use: campmixer wifi join NAME [PASSWORD]"
+		python3 "$NETCONF" join "$1" "${2:-}" || exit $?
+		reload_wifi join
+		;;
+	forget)
+		need_root
+		[ $# -eq 1 ] || die "Use: campmixer wifi forget NAME"
+		python3 "$NETCONF" forget "$1" || exit $?
+		reload_wifi join
+		;;
+	*)
+		usage
+		exit 2
+		;;
+	esac
+}
+
+cmd_lock() {
+	need_root
+	if locked_now && locked_next; then
+		echo "Already locked."
+		return 0
+	fi
+	if ! dpkg-query -W -f='${Status}' overlayroot 2>/dev/null | grep -q "install ok installed"; then
+		apt-get install -y overlayroot || die "Could not install overlayroot. Connect the Pi to the internet and try again."
+	fi
+	if ! locked_now; then
+		# The boot partition's entry in fstab can only be changed while the card is still writable.
+		raspi-config nonint enable_bootro || die "Could not make the boot partition read-only."
+	fi
+	raspi-config nonint enable_overlayfs || die "Could not switch the read-only overlay on."
+	echo "Locked from the next start. Restart now with: sudo reboot"
+}
+
+cmd_unlock() {
+	need_root
+	if ! locked_now && ! locked_next; then
+		raspi-config nonint disable_bootro >/dev/null 2>&1
+		echo "Already unlocked."
+		return 0
+	fi
+	raspi-config nonint disable_overlayfs || die "Could not switch the read-only overlay off."
+	if locked_now; then
+		# /etc/fstab is under the overlay right now, so change the real one beneath it.
+		overlayroot-chroot sed -i -e 's#\(.*/boot/firmware.*\)defaults,ro\(.*\)#\1defaults\2#' /etc/fstab ||
+			echo "Note: the boot partition stays read-only. After the restart run: sudo raspi-config nonint disable_bootro"
+	else
+		raspi-config nonint disable_bootro
+	fi
+	echo "Unlocked from the next start. Restart now with: sudo reboot"
+}
+
+cmd_firststart() {
+	# Runs once, on the first start of a freshly written image. That start has to write to the card
+	# (it grows the file system, makes the SSH keys and sets the passwords). Every later one must not.
+	local flag=/var/lib/campmixer/first-start
+	need_root
+	[ -e "$flag" ] || return 0
+	timeout 180 systemctl is-system-running --wait >/dev/null 2>&1
+	python3 "$APP/firststart.py" || die "First-start set-up failed. It tries again at the next start. See: campmixer logs"
+	rm -f "$flag"
+	cmd_lock || exit 1
+	sync
+	systemctl reboot
+}
+
+cmd_password() {
+	local user="${SUDO_USER:-}"
+	need_root
+	[ -n "$user" ] && [ "$user" != root ] || die "Run this with sudo from your own account."
+	if locked_now; then
+		die "The card is locked, so a new password would be gone at the next start. Run 'sudo campmixer unlock', restart, then this again."
+	fi
+	passwd "$user" || exit 1
+	python3 "$NETCONF" set LOGIN_PASSWORD= >/dev/null
+	echo "Password changed. Any copy of the old one in campmixer.txt has been removed."
+}
+
+case "${1:-}" in
+status)
+	cmd_status
+	;;
+firststart)
+	cmd_firststart
+	;;
+password)
+	cmd_password
+	;;
+wifi)
+	shift
+	cmd_wifi "$@"
+	;;
+lock)
+	cmd_lock
+	;;
+unlock)
+	cmd_unlock
+	;;
+logs)
+	journalctl -b --no-pager -n 120 -u campmixer-firststart.service -u campmixer-netconf.service -u campmixer-radio.service -u campmixer-bridge.service
+	;;
+version)
+	echo "CampMixer OS $VERSION"
+	;;
+*)
+	usage
+	[ $# -eq 0 ] || exit 2
+	;;
+esac

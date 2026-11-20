@@ -1,0 +1,24 @@
+# Build settings for CampMixer OS (read by pi-gen, Raspberry Pi's image builder).
+# build-image.sh uses this file as it is. To change something, copy it to "config" and edit that.
+
+IMG_NAME=CampMixerOS
+TARGET_HOSTNAME=mixer
+
+# The login account. Its real password is set on the card's first start, from campmixer.txt.
+# pi-gen insists on a password here, so build-image.sh fills in a random one that nobody keeps.
+FIRST_USER_NAME=mixer
+FIRST_USER_PASS=SET-BY-BUILD-SCRIPT
+DISABLE_FIRST_BOOT_USER_RENAME=1
+ENABLE_SSH=1
+
+# CampMixer does its own first-start set-up, so Raspberry Pi OS's is left out.
+ENABLE_CLOUD_INIT=0
+
+WPA_COUNTRY=AU
+LOCALE_DEFAULT=en_AU.UTF-8
+KEYBOARD_KEYMAP=us
+KEYBOARD_LAYOUT="English (US)"
+TIMEZONE_DEFAULT=Australia/Perth
+
+DEPLOY_COMPRESSION=xz
+STAGE_LIST="stage0 stage1 stage2 stage-campmixer"

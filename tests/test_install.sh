@@ -1,0 +1,128 @@
+#!/bin/bash
+# Runs install.sh against copies of the stock Raspberry Pi OS boot files and checks every edit it makes.
+# The fixtures are config.txt and cmdline.txt as shipped by pi-gen (arm64 branch, November 2026).
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+KIT="$(dirname "$HERE")"
+
+fail() {
+	echo "FAIL: $*" >&2
+	exit 1
+}
+
+make_root() { # $1 = contents of cmdline.txt
+	local root
+	root="$(mktemp -d)"
+	mkdir -p "$root/boot/firmware" "$root/etc/cloud" "$root/sys/class/net/eth0/device" "$root/var/lib/NetworkManager"
+	cp "$HERE/fixtures/config.txt" "$root/boot/firmware/config.txt"
+	printf '%s\n' "$1" >"$root/boot/firmware/cmdline.txt"
+	printf '127.0.0.1\tlocalhost\n::1\t\tlocalhost ip6-localhost ip6-loopback\n127.0.1.1\traspberrypi\n' >"$root/etc/hosts"
+	echo raspberrypi >"$root/etc/hostname"
+	echo "$root"
+}
+
+install_into() { # $1 = root, rest = extra environment
+	local root="$1"
+	shift
+	env CAMPMIXER_ROOT="$root" "$@" bash "$KIT/install.sh" >"$root/install.log" 2>&1 || {
+		cat "$root/install.log"
+		fail "installer failed"
+	}
+}
+
+STOCK="$(cat "$HERE/fixtures/cmdline.txt")"
+
+# ---- a fresh card
+root="$(make_root "$STOCK")"
+install_into "$root"
+cmdline="$(cat "$root/boot/firmware/cmdline.txt")"
+[ "$(wc -l <"$root/boot/firmware/cmdline.txt")" -eq 1 ] || fail "cmdline.txt is no longer one line"
+[ "$cmdline" = "console=tty1 root=ROOTDEV rootfstype=ext4 fsck.repair=yes rootwait resize cfg80211.ieee80211_regdom=AU" ] ||
+	fail "unexpected cmdline: $cmdline"
+
+config="$root/boot/firmware/config.txt"
+[ "$(grep -c '^# >>> CampMixer >>>$' "$config")" -eq 1 ] || fail "managed block missing"
+for line in '[all]' 'enable_uart=1' 'dtoverlay=disable-bt' 'dtparam=watchdog=on'; do
+	sed -n '/^# >>> CampMixer >>>$/,/^# <<< CampMixer <<<$/p' "$config" | grep -qxF "$line" || fail "config.txt lacks $line"
+done
+head -n "$(wc -l <"$HERE/fixtures/config.txt")" "$config" | cmp -s - "$HERE/fixtures/config.txt" ||
+	fail "the stock part of config.txt was changed"
+
+[ "$(cat "$root/etc/hostname")" = mixer ] || fail "hostname not set"
+grep -qP '^127\.0\.1\.1\tmixer$' "$root/etc/hosts" || fail "/etc/hosts not updated"
+[ "$(grep -c '127.0.1.1' "$root/etc/hosts")" -eq 1 ] || fail "/etc/hosts has two 127.0.1.1 lines"
+[ -e "$root/etc/cloud/cloud-init.disabled" ] || fail "cloud-init left on"
+
+while read -r mode path; do
+	[ "$(stat -c %a "$root/$path")" = "$mode" ] || fail "$path has mode $(stat -c %a "$root/$path"), wanted $mode"
+done <<'EOF'
+755 opt/campmixer/bridge.py
+755 opt/campmixer/netconf.py
+755 opt/campmixer/firststart.py
+644 opt/campmixer/campmixer_link.py
+644 opt/campmixer/VERSION
+644 opt/campmixer/www/index.html
+755 usr/local/sbin/campmixer
+644 etc/systemd/system/campmixer-bridge.service
+644 etc/systemd/system/campmixer-netconf.service
+644 etc/systemd/system/campmixer-radio.service
+644 etc/systemd/system/campmixer-firststart.service
+644 etc/motd
+644 etc/systemd/system.conf.d/10-campmixer-watchdog.conf
+644 etc/systemd/journald.conf.d/10-campmixer.conf
+644 etc/rpi/swap.conf.d/90-campmixer.conf
+644 etc/NetworkManager/dnsmasq-shared.d/campmixer.conf
+600 etc/NetworkManager/system-connections/campmixer-ap.nmconnection
+600 etc/NetworkManager/system-connections/campmixer-eth.nmconnection
+EOF
+
+settings="$root/boot/firmware/campmixer.txt"
+grep -qE '^WIFI_PASSWORD=[a-z2-9]{4}-[a-z2-9]{4}-[a-z2-9]{4}$' "$settings" || fail "no Wi-Fi password was made up"
+password="$(sed -n 's/^WIFI_PASSWORD=//p' "$settings")"
+grep -qxF "psk=$password" "$root/etc/NetworkManager/system-connections/campmixer-ap.nmconnection" ||
+	fail "the access point does not use the password in campmixer.txt"
+grep -q "Own Wi-Fi password: $password" "$root/install.log" || fail "the installer did not show the password"
+
+# ---- running it again changes nothing
+before="$(cat "$config" "$root/boot/firmware/cmdline.txt" "$settings" "$root/etc/hosts" | sha256sum)"
+install_into "$root"
+after="$(cat "$config" "$root/boot/firmware/cmdline.txt" "$settings" "$root/etc/hosts" | sha256sum)"
+[ "$before" = "$after" ] || fail "a second run changed the boot files"
+
+# ---- a card that has been started once, set up for another country, with its own settings file
+used="$(make_root "console=serial0,115200 console=tty1 root=PARTUUID=4d3ee428-02 rootfstype=ext4 fsck.repair=yes rootwait quiet cfg80211.ieee80211_regdom=GB")"
+printf 'dtparam=audio=on\n[all]\nenable_uart=0' >"$used/boot/firmware/config.txt" # no newline at the end
+printf 'WIFI_NAME=Hall Mixer\nWIFI_PASSWORD=my own password\n' >"$used/boot/firmware/campmixer.txt"
+install_into "$used"
+[ "$(cat "$used/boot/firmware/cmdline.txt")" = "console=tty1 root=PARTUUID=4d3ee428-02 rootfstype=ext4 fsck.repair=yes rootwait quiet cfg80211.ieee80211_regdom=GB" ] ||
+	fail "existing country not kept: $(cat "$used/boot/firmware/cmdline.txt")"
+grep -qx 'enable_uart=0' "$used/boot/firmware/config.txt" || fail "existing config line lost"
+[ "$(grep -n '^enable_uart=' "$used/boot/firmware/config.txt" | tail -n1 | cut -d: -f2)" = "enable_uart=1" ] ||
+	fail "enable_uart=1 is not the last word in config.txt"
+grep -qxF 'WIFI_PASSWORD=my own password' "$used/boot/firmware/campmixer.txt" || fail "his password was replaced"
+grep -qxF 'ssid=Hall Mixer' "$used/etc/NetworkManager/system-connections/campmixer-ap.nmconnection" || fail "his network name was not used"
+
+install_into "$used" CAMPMIXER_COUNTRY=NZ CAMPMIXER_HOSTNAME=hallmixer
+grep -q ' cfg80211.ieee80211_regdom=NZ$' "$used/boot/firmware/cmdline.txt" || fail "country override not applied"
+[ "$(grep -o 'regdom' "$used/boot/firmware/cmdline.txt" | wc -l)" -eq 1 ] || fail "two country settings"
+[ "$(cat "$used/etc/hostname")" = hallmixer ] || fail "hostname override not applied"
+
+# ---- building an image: no password goes in, and the card is marked as not yet started
+img="$(make_root "$STOCK")"
+install_into "$img" CAMPMIXER_IMAGE_BUILD=1
+grep -qx 'WIFI_PASSWORD=' "$img/boot/firmware/campmixer.txt" || fail "an image must not carry a Wi-Fi password"
+grep -qx 'LOGIN_PASSWORD=' "$img/boot/firmware/campmixer.txt" || fail "an image must not carry a login password"
+[ -e "$img/var/lib/campmixer/first-start" ] || fail "first-start marker missing from the image"
+[ ! -e "$img/etc/NetworkManager/system-connections" ] || fail "network profiles were written at build time"
+[ "$(cat "$img/boot/firmware/cmdline.txt")" = "console=tty1 root=ROOTDEV rootfstype=ext4 fsck.repair=yes rootwait resize cfg80211.ieee80211_regdom=AU" ] ||
+	fail "image cmdline: $(cat "$img/boot/firmware/cmdline.txt")"
+[ ! -e "$root/var/lib/campmixer/first-start" ] || fail "first-start marker set on a normal install"
+
+# ---- not a Raspberry Pi OS card
+empty="$(mktemp -d)"
+if CAMPMIXER_ROOT="$empty" bash "$KIT/install.sh" >/dev/null 2>&1; then
+	fail "installer ran without boot files"
+fi
+
+echo "installer: all checks passed"
