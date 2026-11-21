@@ -134,21 +134,37 @@ The framing on that link is in `PROTOCOL.md`.
 
 ## What was tested, and what was not
 
-Tested in a Linux workspace, not on a Pi:
+**The checks in `tests/`**, which run in a Linux workspace and again on GitHub before every build:
 
 - The bridge, end to end, against a pretend serial port and a standard WebSocket client: both directions, damaged frames, oversize messages, cross-site refusal, the serial port vanishing.
 - The framing, against the published COBS examples and the CRC check value.
 - Every generated network profile, read back by NetworkManager 1.46's own parser, including awkward names and passwords.
-- The radio's join-or-own decisions, against a scripted stand-in for NetworkManager.
+- The radio's join-or-own decisions, and the wait for a slow USB adaptor, against a scripted stand-in for NetworkManager.
+- The password rules: nothing built in, unusable values refused, a made-up one saved when the file's is blank or unusable.
 - The first-start password set-up, against a stand-in for the system's password tool.
 - The installer's edits, against the stock Raspberry Pi OS `config.txt` and `cmdline.txt`, for both an image build and a running Pi.
+- The two start-up pieces that follow the lock.
 
-Not tested, because it needs a build machine or the real hardware:
+**The image itself, started in an emulator.** `CampMixerOS-0.2.1-build2` was downloaded from Releases and started in QEMU as a Raspberry Pi 3B (QEMU has no Pi 4 model; the same image starts on both). Seven starts in a row covered:
 
-- **The image build itself.** The stage follows pi-gen's rules as of November 2026 but has never been run.
-- Starting up on a Pi 4, the first-start sequence, the access point, joining a venue network, the lock and unlock cycle, the watchdog.
-- The Alfa AWUS036ACM. Its driver and firmware are part of stock Raspberry Pi OS, but it has not been plugged in.
+- The first start with both passwords left blank: file system grown to fill the card, SSH keys made, both passwords made up and written into `campmixer.txt`, card locked, restart.
+- Locked starts: the system on its layer in memory, the boot partition read-only, the file system check skipped, and **no writes to the card at all** from power-on, counted by the kernel on both partitions. With the stock check left in, the count was two writes (8 kB) per start.
+- The web page, `/api/status`, the WebSocket (status feed, cross-site refusal, oversize frames), SSH log-in with the made-up password, a wired network by DHCP.
+- `campmixer status` without sudo, `wifi own`, `wifi join`, refusal of unusable values, and a mistyped password typed straight into the file being replaced at the next start.
+- That the bridge cannot read the settings file.
+- Unlock, an unlocked start (stock file system check runs, card writable), lock again.
+- A first start cut short at its last moment, which finished itself over the next two restarts.
 
-Expect the first build or the first start to need a fix or two. The build log, `campmixer logs` and `campmixer status` are the things to send back.
+Build 1 went through a shorter version of the same, plus a login password change. What that found is in the commit that made 0.2.1.
+
+**Not tested: everything that needs the real hardware.**
+
+- Starting on an actual Pi 4, with its own firmware, and the bootloader update a Pi may apply on its first start.
+- Wi-Fi of any kind. The emulator has no radio, so the access point, joining a venue network, and the choice between the Alfa and the built-in radio have only been checked against stand-ins.
+- The serial link on pins 8 and 10.
+- The hardware watchdog. The emulator resets the moment its watchdog is touched, so it was switched off for these runs.
+- The Alfa AWUS036ACM. Its driver and firmware are in the image, but it has not been plugged in.
+
+If something misbehaves, `campmixer status` and `campmixer logs` are the things to send back.
 
 To re-run the checks: `bash ci/checks.sh` (it makes a Python environment with `websockets` in it and runs everything in `tests/`).
