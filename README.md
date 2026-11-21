@@ -153,34 +153,38 @@ The framing on that link is in `PROTOCOL.md`.
 
 **The checks in `tests/`**, which run in a Linux workspace and again on GitHub before every build:
 
-- The bridge, end to end, against a pretend serial port and a standard WebSocket client: both directions, damaged frames, oversize messages, cross-site refusal, the serial port vanishing.
+- The bridge, end to end, against a pretend serial port and a standard WebSocket client: both directions, damaged frames, oversize messages, cross-site refusal, which host names it answers to, the serial port vanishing.
 - The framing, against the published COBS examples and the CRC check value.
 - Every generated network profile, read back by NetworkManager 1.46's own parser, including awkward names and passwords.
-- The radio's join-or-own decisions, and the wait for a slow USB adaptor, against a scripted stand-in for NetworkManager.
-- The password rules: nothing built in, unusable values refused, a made-up one saved when the file's is blank or unusable.
+- The radio's decisions against a scripted stand-in for NetworkManager: start-up, slow joins, looking again when idle, refused networks, drop-outs.
+- The settings file in UTF-8, old Windows encodings and UTF-16, and the password rules: nothing built in, unusable values refused, a made-up one saved when the file's is blank or unusable.
 - The first-start password set-up, against a stand-in for the system's password tool.
 - The installer's edits, against the stock Raspberry Pi OS `config.txt` and `cmdline.txt`, for both an image build and a running Pi.
 - The two start-up pieces that follow the lock.
 
-**The image itself, started in an emulator.** `CampMixerOS-0.2.1-build2` was downloaded from Releases and started in QEMU as a Raspberry Pi 3B (QEMU has no Pi 4 model; the same image starts on both). Seven starts in a row covered:
+**The image itself, started in an emulator.** `CampMixerOS-0.2.2-build3` was downloaded from Releases and started in QEMU as a Raspberry Pi 3B (QEMU has no Pi 4 model; the same image starts on both). The Pi kernel includes simulated Wi-Fi radios, so Wi-Fi ran on the real NetworkManager, wpa_supplicant and dnsmasq, and the image's own `disable-bt` overlay was applied to the emulated board so the serial port came up as it does on the Pi.
 
-- The first start with both passwords left blank: file system grown to fill the card, SSH keys made, both passwords made up and written into `campmixer.txt`, card locked, restart.
-- Locked starts: the system on its layer in memory, the boot partition read-only, the file system check skipped, and **no writes to the card at all** from power-on, counted by the kernel on both partitions. With the stock check left in, the count was two writes (8 kB) per start.
-- The web page, `/api/status`, the WebSocket (status feed, cross-site refusal, oversize frames), SSH log-in with the made-up password, a wired network by DHCP.
-- `campmixer status` without sudo, `wifi own`, `wifi join`, refusal of unusable values, and a mistyped password typed straight into the file being replaced at the next start.
-- That the bridge cannot read the settings file.
-- Unlock, an unlocked start (stock file system check runs, card writable), lock again.
-- A first start cut short at its last moment, which finished itself over the next two restarts.
+- First start with a settings file saved by old Windows Notepad (not UTF-8, a curly apostrophe in it) and both passwords blank: both made up and written into the file, the rest of the file left byte for byte, card locked, restart.
+- Locked start: no failed units of ours and **no writes to the card at all** from power-on, counted by the kernel on both partitions.
+- The mixer's own Wi-Fi: a simulated phone joined with WPA2 and the made-up password, got an address, loaded the page, and resolved `mixer.local`, `mixer.lan` and `mixer`.
+- A listed network: joined on command, the mixer's own network back 30 s after the listed one vanished, and rejoined a minute after it returned with nobody on the mixer's own.
+- The serial link through the emulated UART, with the bridge running as its own unprivileged user: payloads of 1 to 1024 bytes both ways, a jumper-style loopback, a damaged frame counted and skipped, 200 frames in a burst all delivered in order.
+- The page refused under a foreign host name and served under its own name and address.
 
-Build 1 went through a shorter version of the same, plus a login password change. What that found is in the commit that made 0.2.1.
+On build 2, with the same code for these parts or with the new code loaded over it:
+
+- Unlock, an unlocked start (stock file system check runs, card writable), lock again, and a first start cut short at its last moment finishing itself.
+- A phone connected to the mixer's own network keeps the radio from leaving it; a listed network with the wrong password sends it back to its own within 20 s and is not retried.
+- The radio-choice rules really make NetworkManager leave the unwanted radio alone.
+- The wired port on a cable that can lose its link: a 169.254 address 2 s after plugging in with no DHCP, a DHCP address about 15 s after a server appeared, the 169.254 address back when the lease ran out.
+- Open ports: 22 and 80, plus DNS and DHCP on the mixer's own Wi-Fi and mDNS. Root cannot log in.
 
 **Not tested: everything that needs the real hardware.**
 
 - Starting on an actual Pi 4, with its own firmware, and the bootloader update a Pi may apply on its first start.
-- Wi-Fi of any kind. The emulator has no radio, so the access point, joining a venue network, and the choice between the Alfa and the built-in radio have only been checked against stand-ins.
-- The serial link on pins 8 and 10.
+- The real radios. The Wi-Fi behaviour above ran on simulated ones, so the Pi's built-in chip and the Alfa AWUS036ACM (driver and firmware are in the image) have not carried it, and nothing here says anything about range.
+- The serial link on the actual pins 8 and 10, through whatever sits between the Pi and the mixer core.
 - The hardware watchdog. The emulator resets the moment its watchdog is touched, so it was switched off for these runs.
-- The Alfa AWUS036ACM. Its driver and firmware are in the image, but it has not been plugged in.
 
 If something misbehaves, `campmixer status` and `campmixer logs` are the things to send back.
 
