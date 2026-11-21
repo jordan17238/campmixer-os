@@ -97,7 +97,7 @@ Not in yet: gain, 48 V, ground lift, high-pass, feedback filter, names and scene
 
 **The web app asks for a PIN**, on every network. Without it a browser gets the sign-in page and nothing else: no controls, no status, nothing about the mixer.
 
-- The PIN is `WEB_PIN` in `campmixer.txt`: 6 to 12 digits. `sudo campmixer pin` shows it, `sudo campmixer pin NEW` changes it and `sudo campmixer pin --new` makes one up. Changing it signs every phone out.
+- The PIN is `WEB_PIN` in `campmixer.txt`: 6 to 12 digits. `sudo campmixer pin` shows it, `sudo campmixer pin NEW` changes it and `sudo campmixer pin --new` makes one up. Changing it signs every phone out. (A PIN typed on the command line stays in your shell's history and in the Pi's log until the next restart, where you and root can read it. `--new`, or editing the file, leaves no such trace.)
 - **Guessing is slow.** One address gets five wrong tries, then waits before each further one: 30 s, a minute, two, then five minutes every time. Everybody together gets 20 wrong tries, of which one comes back every three minutes, so changing address does not help. That caps guessing at about 500 PINs a day: centuries against the 100 million eight-digit PINs, a few years against the million six-digit ones. On a network the mixer lives on for good, use eight digits or more.
 - The count of wrong PINs is on the page (under *The Pi and its link*) and in `campmixer status`. It outlives a restart of the bridge.
 - The price of that limit: someone who keeps feeding the page wrong PINs can keep *new* phones from signing in. Phones already signed in are not affected.
@@ -185,39 +185,46 @@ The framing on that link, and the messages for volume, mute and meters that the 
 
 **The checks in `tests/`**, which run in a Linux workspace and again on GitHub before every build:
 
-- The bridge, end to end, against a pretend serial port and a standard WebSocket client: both directions, damaged frames, oversize messages, cross-site refusal, which host names it answers to, the serial port vanishing.
+- Signing in: which PINs are allowed, the hash, the cookies (forged, altered, cut short, signed by another mixer with the same PIN), and the guess limit on a clock the test moves by hand, including the most anyone can get through in a day.
+- The bridge, end to end, against a pretend serial port and a standard WebSocket client, from an address that counts as "the network": nothing without the PIN, the PIN refused when another site's page sends it, the wait after five wrong PINs, a restart that neither clears the count nor signs anyone out, a PIN change that signs everyone out, a missing or damaged sign-in file letting nobody in, sixty idle connections from one address, 400 malformed requests. Also both directions of the link, damaged frames, oversize messages, which host names it answers to, the serial port vanishing.
+- Volume, mute and meters, end to end: two signed-in phones, the real bridge, and the stand-in mixer core on the far side of a pretend serial port. The message examples in `PROTOCOL.md` are checked against both the web app's own code (run with Node) and the stand-in core.
 - The framing, against the published COBS examples and the CRC check value.
 - Every generated network profile, read back by NetworkManager 1.46's own parser, including awkward names and passwords.
 - The radio's decisions against a scripted stand-in for NetworkManager: start-up, slow joins, looking again when idle, refused networks, drop-outs.
-- The settings file in UTF-8, old Windows encodings and UTF-16, and the password rules: nothing built in, unusable values refused, a made-up one saved when the file's is blank or unusable.
+- The settings file in UTF-8, old Windows encodings and UTF-16, and the rules for passwords and the PIN: nothing built in, unusable values refused, made-up ones saved when the file's are blank or unusable, each card with its own key.
 - The first-start password set-up, against a stand-in for the system's password tool.
-- The installer's edits, against the stock Raspberry Pi OS `config.txt` and `cmdline.txt`, for both an image build and a running Pi.
+- The installer's edits, against the stock Raspberry Pi OS `config.txt` and `cmdline.txt`, for both an image build and a running Pi, and that an image carries no password, PIN or key.
 - The two start-up pieces that follow the lock.
 
-**The image itself, started in an emulator.** `CampMixerOS-0.2.2-build3` was downloaded from Releases and started in QEMU as a Raspberry Pi 3B (QEMU has no Pi 4 model; the same image starts on both). The Pi kernel includes simulated Wi-Fi radios, so Wi-Fi ran on the real NetworkManager, wpa_supplicant and dnsmasq, and the image's own `disable-bt` overlay was applied to the emulated board so the serial port came up as it does on the Pi.
+**The web app in a real browser.** `tests/ui_check.js` drives headless Chrome at phone size with touch (it needs Chrome, so it is run by hand, not on GitHub): signing in, a cookie the page's own script cannot read, dragging the faders, a touch on the track and a scroll past a fader both changing nothing, the half-dB buttons, the keyboard, mute, a second phone following the first, a laptop with a mouse, dark mode, the mixer core going away, practice mode, the core coming back, a PIN change signing both phones out, and the wait after wrong PINs. No errors from the browser and nothing blocked by the page's own security rules.
 
-- First start with a settings file saved by old Windows Notepad (not UTF-8, a curly apostrophe in it) and both passwords blank: both made up and written into the file, the rest of the file left byte for byte, card locked, restart.
-- Locked start: no failed units of ours and **no writes to the card at all** from power-on, counted by the kernel on both partitions.
-- The mixer's own Wi-Fi: a simulated phone joined with WPA2 and the made-up password, got an address, loaded the page, and resolved `mixer.local`, `mixer.lan` and `mixer`.
-- A listed network: joined on command, the mixer's own network back 30 s after the listed one vanished, and rejoined a minute after it returned with nobody on the mixer's own.
-- The serial link through the emulated UART, with the bridge running as its own unprivileged user: payloads of 1 to 1024 bytes both ways, a jumper-style loopback, a damaged frame counted and skipped, 200 frames in a burst all delivered in order.
-- The page refused under a foreign host name and served under its own name and address.
+**The image itself, started in an emulator.** `CampMixerOS-0.3.0-build4` was downloaded from Releases and started in QEMU as a Raspberry Pi 3B (QEMU has no Pi 4 model; the same image starts on both). The image's own `disable-bt` overlay was applied to the emulated board so the serial port came up as it does on the Pi, and the stand-in mixer core was connected to that serial port.
 
-On build 2, with the same code for these parts or with the new code loaded over it:
+- The image holds no PIN, no password and no key. On its first start it made up a PIN and a Wi-Fi password, wrote them into the settings file, made its own key (root only), set the login password, locked the card and restarted.
+- Locked: **no writes to the card at all** from power-on, counted by the kernel on both partitions, through fifteen minutes of signing in, guessing and attack. `sudo campmixer pin --new` then wrote the settings file (12 writes to the boot partition, none to the system) and left the partition read-only again; the new PIN was on the card after power-off.
+- From outside the Pi, without the PIN: the sign-in page and nothing else. No status, no WebSocket, no file outside the web folder (the settings file, the key and the sign-in file were asked for by name), no way in by claiming to be the Pi itself, made-up and altered cookies refused, a cookie from another mixer with the same PIN refused, the right PIN refused when sent the way another site's page would send it, a foreign host name turned away. 34 checks.
+- Guessing: five wrong PINs, then a wait during which even the right PIN is turned away and further tries are not counted. Restarting the bridge, and killing it outright, cleared neither the wait nor the count, and signed nobody out. From thirty different addresses, the shared limit stopped every address once the tries were used up.
+- On the Pi: the settings file, the key and the sign-in file cannot be read by the login account without `sudo`, by the bridge's account (except its sign-in file) or by `nobody`. The bridge runs with one capability (the right to use port 80), cannot gain more, and from inside its own view could open the serial port but not the settings file, the key, `/etc/shadow`, the card or the kernel log. systemd rates its exposure 2.1 ("OK"). SSH: root login off, X11 forwarding off, configuration valid.
+- The real page from the real image in headless Chrome at phone size: sign-in, the faders moving the stand-in core through the emulated serial port and a second phone following, mute, a laptop, the core unplugged, practice mode, the core back, and a PIN change from the command line signing the phone out.
+- With simulated Wi-Fi radios (the Pi kernel includes them): the mixer's own network came up with the made-up password, a simulated phone joined with WPA2, got an address, resolved `mixer.local`, `mixer.lan` and `mixer`, got the sign-in page and nothing else, and signed in with the PIN.
 
-- Unlock, an unlocked start (stock file system check runs, card writable), lock again, and a first start cut short at its last moment finishing itself.
-- A phone connected to the mixer's own network keeps the radio from leaving it; a listed network with the wrong password sends it back to its own within 20 s and is not retried.
-- The radio-choice rules really make NetworkManager leave the unwanted radio alone.
-- The wired port on a cable that can lose its link: a 169.254 address 2 s after plugging in with no DHCP, a DHCP address about 15 s after a server appeared, the 169.254 address back when the lease ran out.
-- Open ports: 22 and 80, plus DNS and DHCP on the mixer's own Wi-Fi and mDNS. Root cannot log in.
+On builds 2 and 3, and not run again on build 4 because that code has not changed:
 
-**Not tested: everything that needs the real hardware.**
+- Unlock, an unlocked start, lock again, and a first start cut short at its last moment finishing itself.
+- Joining a listed network, the mixer's own network back 30 s after the listed one vanished, rejoining when it returned; a phone on the mixer's own network keeping the radio from leaving it; a listed network with the wrong password; the radio-choice rules.
+- The wired port on a cable that can lose its link: a 169.254 address 2 s after plugging in with no DHCP, a DHCP address about 15 s after a server appeared.
+- The serial link with payloads of 1 to 1024 bytes both ways, a damaged frame counted and skipped, 200 frames in a burst all delivered in order.
 
+**Not tested, or not there yet.**
+
+- **The mixer core's firmware does not exist yet.** The faders were tested against the stand-in core, which speaks the same messages. Until the Teensy speaks them too, the page has nothing real to move, and says so.
+- Real phones. The page ran in Chrome only. Safari on an iPhone and Chrome on an Android phone have not opened it.
 - Starting on an actual Pi 4, with its own firmware, and the bootloader update a Pi may apply on its first start.
 - The real radios. The Wi-Fi behaviour above ran on simulated ones, so the Pi's built-in chip and the Alfa AWUS036ACM (driver and firmware are in the image) have not carried it, and nothing here says anything about range.
 - The serial link on the actual pins 8 and 10, through whatever sits between the Pi and the mixer core.
 - The hardware watchdog. The emulator resets the moment its watchdog is touched, so it was switched off for these runs.
+- Someone recording the network's traffic. The PIN does not protect against that (see *Who can reach it*), so there was nothing to test.
 
 If something misbehaves, `campmixer status` and `campmixer logs` are the things to send back.
 
-To re-run the checks: `bash ci/checks.sh` (it makes a Python environment with `websockets` in it and runs everything in `tests/`).
+To re-run the checks: `bash ci/checks.sh` (it makes a Python environment with `websockets` in it and runs everything in `tests/` that needs no browser). The browser check: `npm install puppeteer-core`, then `node tests/ui_check.js`. To look at the page yourself on a computer, with the stand-in core behind it: `python3 tests/ui_server.py`.
