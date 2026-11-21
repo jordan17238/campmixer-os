@@ -27,7 +27,8 @@ import time
 PIN_MIN, PIN_MAX = 4, 12
 MADE_UP_DIGITS = 8  # typed once per phone, so the extra digits cost little and make guessing far harder
 # How much guessing is allowed, for everyone together: (wrong tries in hand, seconds for one to come back).
-# A PIN of fewer than six digits has so few possibilities that it gets a far stricter allowance.
+# A PIN of fewer than six digits has so few possibilities that it gets a far stricter allowance. So does an easy
+# one that its owner chose to keep, whatever its length: it is among the first few hundred anyone would try.
 SHORT_PIN = 6
 LIMIT = (20, 180)  # about 500 wrong PINs a day at most
 SHORT_LIMIT = (10, 900)  # about 100 a day at most
@@ -62,8 +63,8 @@ def weak_pin(pin):
 
 
 def guess_limit(pin):
-    """The allowance of wrong tries that goes with this PIN: stricter for a short one."""
-    return SHORT_LIMIT if len(pin) < SHORT_PIN else LIMIT
+    """The allowance of wrong tries that goes with this PIN: stricter for a short one or an easy one."""
+    return SHORT_LIMIT if len(pin) < SHORT_PIN or weak_pin(pin) else LIMIT
 
 
 def tidy_pin(text):
@@ -76,11 +77,14 @@ def looks_like_pin(pin):
     return isinstance(pin, str) and pin.isascii() and pin.isdigit() and PIN_MIN <= len(pin) <= PIN_MAX
 
 
-def pin_problem(pin):
-    """Why this cannot be the PIN, or None if it can."""
+def pin_problem(pin, easy_ok=False):
+    """Why this cannot be the PIN, or None if it can.
+
+    easy_ok: the mixer's owner has said to keep even a PIN that anyone would guess (ALLOW_EASY_PIN=yes).
+    """
     if not looks_like_pin(pin):
         return "must be %d to %d digits" % (PIN_MIN, PIN_MAX)
-    if weak_pin(pin):
+    if weak_pin(pin) and not easy_ok:
         return "is one of the first a stranger would try"
     return None
 
@@ -107,14 +111,15 @@ def _unb64(text):
     return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
 
 
-def derive(web_key, pin):
+def derive(web_key, pin, easy_ok=False):
     """What the bridge needs in order to check this PIN and sign cookies. Root's side; the result goes in a file.
 
     web_key is 32 random bytes that never leave root's hands and stay the same from start to start, so a phone
     that has signed in stays signed in across restarts. The cookie key is tied to the PIN's hash, so changing
-    the PIN makes every cookie handed out before it worthless.
+    the PIN makes every cookie handed out before it worthless. An easy PIN is turned down here as well, unless
+    the caller passes on the owner's say-so, so that no slip elsewhere can put one to use.
     """
-    if len(web_key) != 32 or pin_problem(pin):
+    if len(web_key) != 32 or pin_problem(pin, easy_ok):
         raise ValueError("need a 32-byte key and a usable PIN")
     salt = _mac(web_key, b"campmixer pin salt")[:16]
     pin_hash = hashlib.scrypt(pin.encode("ascii"), salt=salt, dklen=32, maxmem=SCRYPT_MAXMEM, **SCRYPT)

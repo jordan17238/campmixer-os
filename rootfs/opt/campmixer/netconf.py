@@ -13,6 +13,7 @@ It also hands the web app's PIN to the bridge, as a hash (how and why is in camp
   netconf.py forget NAME            remove one
   netconf.py pin                    print the web app's PIN
   netconf.py pin NEW | --new        change it, to NEW or to a made-up one; every phone has to sign in again
+  netconf.py pin --force NEW        the same, even if NEW is one anyone would guess (sets ALLOW_EASY_PIN=yes)
 
 Python standard library only.
 """
@@ -64,7 +65,8 @@ POLL_S = 5
 LOOK_AFTER_IDLE_S = (60, 300, 600, 1200, 2400, 3600)
 RETRY_REFUSED_S = 1800  # a listed network that would not let the mixer in is left alone this long
 LOOK_NOW_FLAG = ROOT / "run/campmixer-look-now"
-KNOWN_KEYS = ["WIFI_NAME", "WIFI_PASSWORD", "WIFI_BAND", "WIFI_CHANNEL", "WIFI_RADIO", "LOGIN_PASSWORD", "WEB_PIN"] + [
+KNOWN_KEYS = ["WIFI_NAME", "WIFI_PASSWORD", "WIFI_BAND", "WIFI_CHANNEL", "WIFI_RADIO", "LOGIN_PASSWORD", "WEB_PIN",
+              "ALLOW_EASY_PIN"] + [
     key for slot in range(1, JOIN_SLOTS + 1) for key in ("JOIN_WIFI_%d" % slot, "JOIN_WIFI_%d_PASSWORD" % slot)
 ]
 # Fixed namespace, so each profile keeps the same identity from one start-up to the next.
@@ -121,6 +123,21 @@ def read_raw():
     return parse_file(read_settings_text()[0])
 
 
+def yes_or_no(value):
+    """A yes/no setting: True, False (blank counts as no), or None for anything else."""
+    word = value.strip().lower()
+    if word in ("yes", "y", "true", "on", "1"):
+        return True
+    if word in ("", "no", "n", "false", "off", "0"):
+        return False
+    return None
+
+
+def easy_pin_allowed(raw):
+    """Whether the owner has said to keep a PIN that anyone would guess. Only a clear yes counts."""
+    return yes_or_no(raw.get("ALLOW_EASY_PIN", "")) is True
+
+
 def valid_name(name):
     return 0 < len(name.encode("utf-8")) <= 32 and all(ord(ch) >= 32 and ord(ch) != 127 for ch in name)
 
@@ -146,6 +163,7 @@ class Settings:
         self.channel = DEFAULT_CHANNEL["2.4"]
         self.radio = "auto"
         self.pin = None  # no usable PIN: nobody can sign in to the web app
+        self.easy_pin = False  # keep a PIN that anyone would guess, because the owner said so
         self.joins = []  # (slot, name, password)
         self.issues = []  # (setting, what is wrong and what happens instead)
 
@@ -207,8 +225,11 @@ def load_settings(raw=None):
     else:
         settings.issues.append(("WIFI_RADIO", "WIFI_RADIO must be auto, usb or onboard; using auto"))
 
+    if yes_or_no(raw.get("ALLOW_EASY_PIN", "")) is None:
+        settings.issues.append(("ALLOW_EASY_PIN", "ALLOW_EASY_PIN must be yes or no; using no"))
+    settings.easy_pin = easy_pin_allowed(raw)
     pin = auth.tidy_pin(raw.get("WEB_PIN", ""))
-    pin_problem = auth.pin_problem(pin)
+    pin_problem = auth.pin_problem(pin, settings.easy_pin)
     if pin_problem is None:
         settings.pin = pin
     else:
@@ -310,7 +331,8 @@ def ensure_made_up():
     """Never run on a password or a PIN that is written down somewhere public, or that anyone would guess.
 
     A blank or unusable WIFI_PASSWORD or WEB_PIN is replaced by a made-up one, saved in campmixer.txt for the
-    mixer's owner to read. Nothing of the kind is built into the image.
+    mixer's owner to read. Nothing of the kind is built into the image. A PIN that anyone would guess goes the
+    same way unless the owner has said to keep it (ALLOW_EASY_PIN=yes, which "campmixer pin --force" sets).
     """
     try:
         raw = read_raw()
@@ -322,9 +344,14 @@ def ensure_made_up():
         changes["WIFI_PASSWORD"] = make_password()
         notes.append("WIFI_PASSWORD was %s" % ("not usable" if password else "blank"))
     pin = auth.tidy_pin(raw.get("WEB_PIN", ""))
-    if auth.pin_problem(pin):
+    if auth.pin_problem(pin, easy_pin_allowed(raw)):
         changes["WEB_PIN"] = auth.make_pin()
-        notes.append("WEB_PIN was %s" % ("not usable or too easy to guess" if pin else "blank"))
+        if not pin:
+            notes.append("WEB_PIN was blank")
+        elif auth.looks_like_pin(pin):
+            notes.append("WEB_PIN was too easy to guess (ALLOW_EASY_PIN=yes would have kept it)")
+        else:
+            notes.append("WEB_PIN was not usable")
     if not changes:
         return
     try:
@@ -379,7 +406,7 @@ def web_key(create=True):
     return key
 
 
-def write_web_auth(pin):
+def write_web_auth(pin, easy_ok=False):
     """Give the bridge what it needs to check the PIN and recognise its own cookies, and nothing more.
 
     Without a usable PIN the file is taken away, and the bridge then lets nobody sign in.
@@ -388,7 +415,7 @@ def write_web_auth(pin):
         with contextlib.suppress(FileNotFoundError):
             WEB_AUTH_FILE.unlink()
         return
-    data = json.dumps(auth.derive(web_key(), pin), indent=1).encode("ascii") + b"\n"
+    data = json.dumps(auth.derive(web_key(), pin, easy_ok), indent=1).encode("ascii") + b"\n"
     try:
         gid = grp.getgrnam(BRIDGE_GROUP).gr_gid
     except KeyError:
@@ -418,7 +445,7 @@ def write_web_auth(pin):
 
 def apply_pin(settings):
     try:
-        write_web_auth(settings.pin)
+        write_web_auth(settings.pin, settings.easy_pin)
     except (OSError, ValueError) as exc:
         log("could not set up the web app's PIN (%s); nobody can sign in until that is fixed" % exc)
         with contextlib.suppress(OSError):
@@ -853,6 +880,8 @@ def show(with_passwords):
     print("Band and channel:   %s GHz, channel %d" % (settings.band, settings.channel))
     print("Radio:              " + settings.radio)
     print("Web app PIN:        " + (secret(settings.pin) if settings.pin else "(not set, so nobody can sign in)"))
+    if settings.pin and auth.weak_pin(settings.pin):
+        print("                    an easy one to guess, kept because ALLOW_EASY_PIN=yes")
     if settings.joins:
         for slot, name, password in settings.joins:
             print("Joins when in range: %s (slot %d, password %s)" % (name, slot, secret(password)))
@@ -924,21 +953,39 @@ def forget(name):
 
 
 def pin_command(rest):
-    if not rest:
+    force = "--force" in rest
+    rest = [word for word in rest if word != "--force"]
+    if not rest and not force:
         pin = load_settings().pin
         print(pin if pin else "No usable PIN is set, so nobody can sign in. Make one up with: sudo campmixer pin --new")
         return 0 if pin else 1
+    if len(rest) != 1 or (force and rest == ["--new"]):
+        print("Use: campmixer pin, campmixer pin NEW, campmixer pin --force NEW or campmixer pin --new", file=sys.stderr)
+        return 2
+    try:
+        raw = read_raw()
+    except OSError:
+        raw = {}
+    already_allowed = easy_pin_allowed(raw)
     new = auth.make_pin() if rest == ["--new"] else auth.tidy_pin(rest[0])
-    problem = auth.pin_problem(new)
+    problem = auth.pin_problem(new, force or already_allowed)
     if problem:
         print("Not changed: the PIN %s." % problem, file=sys.stderr)
+        if auth.looks_like_pin(new):
+            print("To use it anyway: sudo campmixer pin --force %s" % new, file=sys.stderr)
         return 2
-    update_file({"WEB_PIN": new})
+    easy = auth.weak_pin(new)
+    changes = {"WEB_PIN": new}
+    if easy and not already_allowed:
+        changes["ALLOW_EASY_PIN"] = "yes"  # or the next start-up would replace it with a made-up one
+    update_file(changes)
     settings = load_settings()
     if settings.pin != new or not apply_pin(settings):
         print("PROBLEM: the new PIN is saved in campmixer.txt but could not be put to use. See: campmixer logs", file=sys.stderr)
         return 1
     print("The PIN is now %s. Every phone has to sign in again with it." % new)
+    if easy:
+        print("It is one of the first a stranger would try. ALLOW_EASY_PIN=yes in campmixer.txt keeps it.")
     return 0
 
 
@@ -964,7 +1011,7 @@ def main(argv):
         return join(rest[0], rest[1] if len(rest) == 2 else "")
     if command == "forget" and len(rest) == 1:
         return forget(rest[0])
-    if command == "pin" and len(rest) <= 1:
+    if command == "pin" and len(rest) <= 2:
         return pin_command(rest)
     if command == "web-key" and not rest:  # make this Pi's key for the web app now, while the card can be written
         web_key()

@@ -17,12 +17,15 @@ for weak in ("000000", "111111", "999999", "123456", "234567", "654321", "987654
              "1987", "1999", "2000", "2024", "2026", "1900", "2099", "12345", "54321", "11111", "13579"):
     assert auth.weak_pin(weak), weak
     assert auth.pin_problem(weak) == "is one of the first a stranger would try", weak
+    assert auth.pin_problem(weak, True) is None, weak  # unless the owner has said to keep an easy one
+    assert auth.guess_limit(weak) == auth.SHORT_LIMIT, weak  # which then gets the strict allowance, whatever its length
 for fine in ("482719", "305918", "48271935", "90517362", "663104", "700214", "281746593021", "4827", "9051", "7305", "0394", "3187",
              "63104", "40718"):
     assert not auth.weak_pin(fine) and auth.pin_problem(fine) is None, fine
 for not_a_pin in ("", "1", "123", "482", "1234567890123", "48271x", "482 719", "-482719", "+482719", "4827.19", "４８２７１９３５",
                   "٤٨٢٧١٩٣٥", "48271935\n", "４８２７", None, 48271935, 4827, b"48271935", ["48271935"]):
     assert auth.pin_problem(not_a_pin) == "must be 4 to 12 digits", repr(not_a_pin)
+    assert auth.pin_problem(not_a_pin, True) == "must be 4 to 12 digits", repr(not_a_pin)  # the owner's say-so does not stretch to this
 assert auth.tidy_pin(" 4827 1935 ") == "48271935" and auth.tidy_pin("4827-1935") == "48271935"
 made = {auth.make_pin() for _ in range(2000)}
 assert len(made) > 1990 and all(len(pin) == 8 and auth.pin_problem(pin) is None for pin in made)
@@ -50,9 +53,22 @@ assert check.check_pin("48271935")
 for wrong in ("48271936", "4827193", "482719350", "", "0", "x" * 8, "48271935 ", " 48271935", "４８２７１９３５", None, 48271935, b"48271935",
               ["48271935"], {"pin": "48271935"}, "48271935\x00", "9" * 5000):
     assert check.check_pin(wrong) is False, repr(wrong)
-for bad_key, bad_pin in ((b"short", "48271935"), (key_a, "123456"), (key_a, "12"), (key_a, "123"), (key_a, "1234"), (key_a + b"x", "48271935")):
+for bad_key, bad_pin in ((b"short", "48271935"), (key_a, "123456"), (key_a, "12"), (key_a, "123"), (key_a, "1234"), (key_a, "1948"),
+                         (key_a + b"x", "48271935")):
     try:
         auth.derive(bad_key, bad_pin)
+        raise AssertionError("derive accepted %r %r" % (bad_key, bad_pin))
+    except ValueError:
+        pass
+# An easy PIN is put to use only on the owner's say-so, and then with the strict allowance even at six digits or more.
+for easy_pin in ("1948", "1234", "123456", "12341234"):
+    easy = auth.derive(key_a, easy_pin, True)
+    assert (easy["budget"], easy["refill_s"]) == (10, 900), easy_pin
+    assert auth.Verifier(easy).check_pin(easy_pin) and not auth.Verifier(easy).check_pin("48271935"), easy_pin
+assert auth.derive(key_a, "48271935", True) == record  # the say-so changes nothing for a PIN that is not easy
+for bad_key, bad_pin in ((b"short", "1948"), (key_a, "12"), (key_a, "123"), (key_a, "1234567890123"), (key_a, "19x8")):
+    try:
+        auth.derive(bad_key, bad_pin, True)
         raise AssertionError("derive accepted %r %r" % (bad_key, bad_pin))
     except ValueError:
         pass

@@ -17,6 +17,7 @@ campmixer status                        what the Pi is doing right now
 campmixer pin                           the PIN the web app asks for
 campmixer pin NEW                       change it (4 to 12 digits); every phone has to sign in again
 campmixer pin --new                     change it to a made-up one
+campmixer pin --force NEW               change it to NEW even if it is one anyone would guess (1234, a year)
 campmixer wifi                          Wi-Fi settings in use, with the passwords
 campmixer wifi own --name NAME --password PASSWORD [--band 2.4|5] [--channel N]
                                         change the mixer's own Wi-Fi network
@@ -205,7 +206,7 @@ cmd_wifi() {
 
 cmd_pin() {
 	need_root
-	[ $# -le 1 ] || die "Use: campmixer pin, campmixer pin NEW or campmixer pin --new"
+	[ $# -le 2 ] || die "Use: campmixer pin, campmixer pin NEW, campmixer pin --force NEW or campmixer pin --new"
 	python3 "$NETCONF" pin "$@"
 }
 

@@ -31,11 +31,17 @@ JOIN_WIFI_4_PASSWORD=
 # ---- PIN for the web app ----
 # Each phone is asked for it once, the first time it opens the mixer's page. 4 to 12 digits.
 # Leave it blank and the mixer makes up an 8-digit one at start-up and writes it here to read.
-# One that anyone would guess (1234, 1111, 1212, a year such as 1987, 123456 and the like) is replaced in the same way.
+# One that anyone would guess (1234, 1111, 1212, a year such as 1987, 123456 and the like) is replaced in the same way,
+# unless ALLOW_EASY_PIN below says yes.
 # A PIN of 4 or 5 digits is easier to guess, so with one the mixer allows far fewer wrong tries: after ten,
 # a phone that is not yet signed in may have to wait up to a quarter of an hour for its next try.
 # Changing it signs every phone out. Do not use a birthday or a phone's own PIN.
 WEB_PIN=
+
+# yes keeps a WEB_PIN that anyone would guess, instead of replacing it. Whoever can reach the mixer's page can
+# then guess their way in: at the first try for 1234, within a day or so for a year. Only for a mixer whose
+# Wi-Fi password you keep to people you trust with it.
+ALLOW_EASY_PIN=no
 
 # ---- Which radio ----
 # auto     the USB Wi-Fi adaptor if it is plugged in at start-up, otherwise the Pi's built-in radio

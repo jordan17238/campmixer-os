@@ -310,6 +310,8 @@ for refused, reason in (
     (["WEB_PIN=123456"], "WEB_PIN is one of the first a stranger would try."),
     (["WEB_PIN=1234"], "WEB_PIN is one of the first a stranger would try."),
     (["WEB_PIN=1987"], "WEB_PIN is one of the first a stranger would try."),
+    (["ALLOW_EASY_PIN=maybe"], "ALLOW_EASY_PIN must be yes or no."),
+    (["ALLOW_EASY_PIN=yes", "WEB_PIN=123"], "WEB_PIN must be 4 to 12 digits."),
 ):
     done = run(edit, "set", *refused)
     assert done.returncode == 2 and "Not changed: " + reason in done.stderr, (refused, done.stderr)
@@ -398,9 +400,74 @@ for typed in ("123456", "000000", "1234", "1987", "123", "12121212", "hunter2", 
     weak = make_root("WIFI_PASSWORD=abcd-efgh-jkmn\nWEB_PIN=%s\n# end\n" % typed, [USB])
     done = run(weak, "apply")
     made = re.search(r"^WEB_PIN=(\d{8})$", settings_file(weak), re.M)
-    assert made and "WEB_PIN was not usable or too easy to guess" in done.stderr, (typed, done.stderr, settings_file(weak))
+    why = "too easy to guess (ALLOW_EASY_PIN=yes would have kept it)" if typed in ("123456", "000000", "1234", "1987", "12121212") else "not usable"
+    assert made and "WEB_PIN was %s, so a new one was made up" % why in done.stderr, (typed, done.stderr, settings_file(weak))
     assert settings_file(weak).endswith("\n# end\n") and not campmixer_auth.weak_pin(made.group(1))
     assert campmixer_auth.Verifier(auth_file(weak)).check_pin(made.group(1))
+
+# An easy PIN is kept when the owner says so in the file. Only a clear yes counts.
+for said in ("yes", "YES", " Yes ", "true", "on", "1", '"yes"'):
+    kept = make_root("WIFI_PASSWORD=abcd-efgh-jkmn\nWEB_PIN=1948\nALLOW_EASY_PIN=%s\n# end\n" % said, [USB])
+    before = settings_file(kept)
+    done = run(kept, "apply")
+    assert done.returncode == 0 and "made up" not in done.stderr and settings_file(kept) == before, (said, done.stderr, settings_file(kept))
+    easy = auth_file(kept)
+    assert campmixer_auth.Verifier(easy).check_pin("1948") and (easy["budget"], easy["refill_s"]) == (10, 900), said
+    assert run(kept, "apply").returncode == 0 and auth_file(kept) == easy and settings_file(kept) == before  # start-up after start-up
+for said in ("no", "", "maybe", "yes please", "ja"):
+    swapped = make_root("WIFI_PASSWORD=abcd-efgh-jkmn\nWEB_PIN=1948\nALLOW_EASY_PIN=%s\n# end\n" % said, [USB])
+    done = run(swapped, "apply")
+    made = re.search(r"^WEB_PIN=(\d{8})$", settings_file(swapped), re.M)
+    assert made and "WEB_PIN was too easy to guess" in done.stderr and "ALLOW_EASY_PIN=%s\n" % said in settings_file(swapped), (said, done.stderr)
+    assert not campmixer_auth.Verifier(auth_file(swapped)).check_pin("1948") and campmixer_auth.Verifier(auth_file(swapped)).check_pin(made.group(1))
+    shown = run(swapped, "show")
+    assert ("PROBLEM: ALLOW_EASY_PIN must be yes or no; using no" in shown.stdout) == (said in ("maybe", "yes please", "ja")), (said, shown.stdout)
+shown = run(kept, "show", "--passwords")
+assert "Web app PIN:        1948\n                    an easy one to guess, kept because ALLOW_EASY_PIN=yes\n" in shown.stdout, shown.stdout
+assert "an easy one" not in run(pins, "show", "--passwords").stdout
+
+# "pin --force" is the command for it: it sets the PIN and the yes together, on a card whose file has no such line yet.
+forced = make_root("WIFI_PASSWORD=abcd-efgh-jkmn\nWEB_PIN=48271935\n# end\n", [USB])
+assert run(forced, "apply").returncode == 0
+old_token = campmixer_auth.Verifier(auth_file(forced)).new_token()
+before = settings_file(forced)
+done = run(forced, "pin", "1948")
+assert done.returncode == 2 and "Not changed: the PIN is one of the first a stranger would try." in done.stderr, done.stderr
+assert "To use it anyway: sudo campmixer pin --force 1948" in done.stderr and settings_file(forced) == before, done.stderr
+for words in (["--force"], ["--force", "--new"], ["--force", "1948", "1949"], ["1948", "1949"], ["--force", "--force"]):
+    done = run(forced, "pin", *words)
+    assert done.returncode == 2 and settings_file(forced) == before, (words, done.stdout, done.stderr)
+for words, reason in ((["--force", "123"], "4 to 12 digits"), (["--force", "19x8"], "4 to 12 digits"), (["--force", ""], "4 to 12 digits")):
+    done = run(forced, "pin", *words)
+    assert done.returncode == 2 and reason in done.stderr and "To use it anyway" not in done.stderr and settings_file(forced) == before, (words, done.stderr)
+done = run(forced, "pin", "--force", "1948")
+assert done.returncode == 0 and "The PIN is now 1948. Every phone has to sign in again with it." in done.stdout, done.stdout + done.stderr
+assert "ALLOW_EASY_PIN=yes in campmixer.txt keeps it" in done.stdout, done.stdout
+assert settings_file(forced) == "WIFI_PASSWORD=abcd-efgh-jkmn\nWEB_PIN=1948\n# end\nALLOW_EASY_PIN=yes\n", settings_file(forced)
+easy = auth_file(forced)
+easy_checker = campmixer_auth.Verifier(easy)
+assert easy_checker.check_pin("1948") and not easy_checker.check_pin("48271935") and not easy_checker.token_ok(old_token)
+assert (easy["budget"], easy["refill_s"]) == (10, 900)
+assert run(forced, "apply").returncode == 0 and auth_file(forced) == easy and "WEB_PIN=1948\n" in settings_file(forced)  # it survives a start-up
+assert run(forced, "pin").stdout.strip() == "1948"
+# With the yes in the file, another easy one needs no --force, in either order of words, and six easy digits get the strict allowance too.
+done = run(forced, "pin", "123456")
+assert done.returncode == 0 and "one of the first a stranger would try" in done.stdout and auth_file(forced)["budget"] == 10, done.stdout + done.stderr
+done = run(forced, "pin", "2024", "--force")
+assert done.returncode == 0 and campmixer_auth.Verifier(auth_file(forced)).check_pin("2024") and settings_file(forced).count("ALLOW_EASY_PIN") == 1
+# A PIN that is not easy is not called one, and forcing it changes nothing else in the file.
+plain = make_root("WIFI_PASSWORD=abcd-efgh-jkmn\nWEB_PIN=48271935\n", [USB])
+run(plain, "apply")
+done = run(plain, "pin", "--force", "7305")
+assert done.returncode == 0 and "stranger" not in done.stdout and "ALLOW_EASY_PIN" not in settings_file(plain), done.stdout + settings_file(plain)
+# Taking the yes back swaps the easy PIN for a made-up one there and then.
+done = run(forced, "set", "ALLOW_EASY_PIN=no")
+made = re.search(r"^WEB_PIN=(\d{8})$", settings_file(forced), re.M)
+assert done.returncode == 0 and made and "WEB_PIN was too easy to guess" in done.stderr, (done.stdout, done.stderr, settings_file(forced))
+assert campmixer_auth.Verifier(auth_file(forced)).check_pin(made.group(1)) and not campmixer_auth.Verifier(auth_file(forced)).check_pin("2024")
+# And both can be set in one go, the way the file would be edited by hand.
+done = run(forced, "set", "WEB_PIN=1948", "ALLOW_EASY_PIN=yes")
+assert done.returncode == 0 and campmixer_auth.Verifier(auth_file(forced)).check_pin("1948"), done.stdout + done.stderr
 
 # Every card makes up its own key and its own PIN: nothing is shared between two mixers.
 other = make_root("WIFI_PASSWORD=abcd-efgh-jkmn\n", [USB])

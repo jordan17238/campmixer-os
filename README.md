@@ -1,4 +1,4 @@
-# CampMixer OS 0.4.0
+# CampMixer OS 0.4.1
 
 Its own operating system for the Camp PA Mixer's Raspberry Pi, built on Raspberry Pi OS Lite (64-bit).
 You write one image to a microSD card and the Pi starts up as the mixer's remote. There is no install step.
@@ -53,6 +53,7 @@ Any password or PIN you left blank is made up on that first start and written in
     JOIN_WIFI_1=Church Hall      up to four networks to join when in range
     JOIN_WIFI_1_PASSWORD=...
     WEB_PIN=...                  4 to 12 digits; each phone is asked for it once
+    ALLOW_EASY_PIN=no            yes keeps a PIN anybody would guess
     WIFI_RADIO=auto              auto, usb or onboard
     LOGIN_PASSWORD=              read once, on the first start
 
@@ -74,7 +75,7 @@ A phone on the mixer's own network will say it has no internet, because it has n
 
 Save the file as plain text in UTF-8, which is what Notepad and TextEdit do by default now. A file in another encoding is still read, but a name with an accent or a curly apostrophe in it (`Jordan’s iPhone`) will not match the real network, and `campmixer wifi` says so.
 
-There is no built-in Wi-Fi password and no built-in PIN. If `WIFI_PASSWORD` is blank or cannot be used (it needs 8 to 63 characters), the mixer makes one up at start-up and writes it into the file. The same goes for `WEB_PIN` when it is blank, is not 4 to 12 digits, or is one anybody would guess (1234, 1111, 1212, a year such as 1987, 123456 and the like): an 8-digit one is made up. The commands refuse a value the mixer could not use, and change nothing.
+There is no built-in Wi-Fi password and no built-in PIN. If `WIFI_PASSWORD` is blank or cannot be used (it needs 8 to 63 characters), the mixer makes one up at start-up and writes it into the file. The same goes for `WEB_PIN` when it is blank, is not 4 to 12 digits, or is one anybody would guess (1234, 1111, 1212, a year such as 1987, 123456 and the like): an 8-digit one is made up. An easy PIN stays only if `ALLOW_EASY_PIN` says `yes` (see *Who can reach it*). The commands refuse a value the mixer could not use, and change nothing.
 
 ## The web app
 
@@ -102,6 +103,7 @@ Not in yet: gain, 48 V, ground lift, high-pass, feedback filter, names and scene
 - The PIN is `WEB_PIN` in `campmixer.txt`: 4 to 12 digits. `sudo campmixer pin` shows it, `sudo campmixer pin NEW` changes it and `sudo campmixer pin --new` makes one up. Changing it signs every phone out. (A PIN typed on the command line stays in your shell's history and in the Pi's log until the next restart, where you and root can read it. `--new`, or editing the file, leaves no such trace.)
 - **Guessing is slow.** One address gets five wrong tries, then waits before each further one: 30 s, a minute, two, then five minutes every time. Everybody together gets 20 wrong tries, of which one comes back every three minutes, so changing address does not help. That caps guessing at about 500 PINs a day: centuries against the 100 million eight-digit PINs, a few years against the million six-digit ones.
 - **A PIN of 4 or 5 digits gets a stricter limit**, because it has so few possibilities: everybody together gets 10 wrong tries and one comes back every quarter of an hour, about 100 a day. Against a four-digit PIN that is still about a one-in-a-hundred chance for every day someone on the network spends guessing. That is fine behind the mixer's own Wi-Fi password, where a stranger cannot reach the page at all. On a network the mixer shares with strangers, or lives on for good, use six digits or more, better eight.
+- **An easy PIN is turned down unless you force it.** `sudo campmixer pin --force 1948` sets it anyway and writes `ALLOW_EASY_PIN=yes` into the file, which is what stops the next start-up from replacing it. An easy PIN gets the strict limit whatever its length, but no limit makes up for the PIN itself: 1234 falls at the first try, and a year is among the first hundred or so that anyone tries, about a day of guessing. Such a PIN is only as good as the Wi-Fi password in front of it.
 - The count of wrong PINs is on the page (under *The Pi and its link*) and in `campmixer status`. It outlives a restart of the bridge.
 - The price of that limit: someone who keeps feeding the page wrong PINs can keep *new* phones from signing in (with a short PIN, ten wrong tries are enough to make the next phone wait up to a quarter of an hour). Phones already signed in are not affected.
 - A web site out on the internet cannot reach in through someone's browser: the mixer answers only to its own name (`mixer.local`, `mixer`, `mixer.lan` and the like) or its address, takes a PIN only from its own page, and lets only its own page use the controls.
@@ -121,6 +123,7 @@ Not in yet: gain, 48 V, ground lift, high-pass, feedback filter, names and scene
     sudo campmixer pin                        the PIN the web app asks for
     sudo campmixer pin 48271935               change it (every phone signs in again)
     sudo campmixer pin --new                  change it to a made-up one
+    sudo campmixer pin --force 1948           change it to one the mixer would turn down as too easy
     sudo campmixer wifi                       settings in use, with passwords and the PIN
     sudo campmixer wifi join "Church Hall" "its password"
     sudo campmixer wifi forget "Church Hall"
@@ -160,8 +163,8 @@ Reading does not wear a card. The Pi reads the system from the card once at star
 
 Build 4 (0.3.0) has no `update` command yet. To update from it, after the unlock and restart:
 
-    curl -fsSL https://github.com/jordan17238/campmixer-os/archive/refs/tags/v0.4.0-build6.tar.gz | tar xz -C /tmp
-    sudo bash /tmp/campmixer-os-0.4.0-build6/install.sh
+    curl -fsSL https://github.com/jordan17238/campmixer-os/archive/refs/tags/v0.4.1-build7.tar.gz | tar xz -C /tmp
+    sudo bash /tmp/campmixer-os-0.4.1-build7/install.sh
     sudo reboot
 
 Or write the newer image to the card, as for a new one. Copy `campmixer.txt` off the card first and put it back afterwards to keep your settings.
@@ -210,7 +213,7 @@ The framing on that link, and the messages for volume, mute and meters that the 
 - The framing, against the published COBS examples and the CRC check value.
 - Every generated network profile, read back by NetworkManager 1.46's own parser, including awkward names and passwords.
 - The radio's decisions against a scripted stand-in for NetworkManager: start-up, slow joins, looking again when idle, refused networks, drop-outs.
-- The settings file in UTF-8, old Windows encodings and UTF-16, and the rules for passwords and the PIN: nothing built in, unusable values refused, made-up ones saved when the file's are blank or unusable, each card with its own key.
+- The settings file in UTF-8, old Windows encodings and UTF-16, and the rules for passwords and the PIN: nothing built in, unusable values refused, made-up ones saved when the file's are blank or unusable, an easy PIN kept only on the owner's say-so (in the file or with `pin --force`), each card with its own key.
 - The first-start password set-up, against a stand-in for the system's password tool.
 - The installer's edits, against the stock Raspberry Pi OS `config.txt` and `cmdline.txt`, for both an image build and a running Pi, and that an image carries no password, PIN or key.
 - The two start-up pieces that follow the lock.
