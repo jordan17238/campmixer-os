@@ -1,4 +1,4 @@
-# CampMixer OS 0.2.1
+# CampMixer OS 0.2.2
 
 Its own operating system for the Camp PA Mixer's Raspberry Pi, built on Raspberry Pi OS Lite (64-bit).
 You write one image to a microSD card and the Pi starts up as the mixer's remote. There is no install step.
@@ -7,9 +7,9 @@ This folder is the source for that image.
 
 ## What the OS does
 
-- **Web app at http://mixer.local.** For now a status page with a serial loopback test. The real mixer app drops into the same place later.
+- **Web app at http://mixer.local.** For now a status page with a serial loopback test. The real mixer app drops into the same place later. The page has no log-in: see *Who can reach it* below.
 - **Wi-Fi.** It joins a network you have listed when that network is in range, so the mixer sits on the venue's LAN. Otherwise it makes its own network, `CampMixer`.
-- **Ethernet.** Plug it into any network and it takes an address. A cable straight to a laptop works too.
+- **Ethernet.** Plug it into any network and it takes an address. A cable straight to a laptop works too, within a few seconds, on a 169.254 address. It keeps asking for a proper address in the background, so a router that starts up after the mixer is still picked up without touching the cable.
 - **SSH** is on: `ssh mixer@mixer.local`.
 - **Serial link** to the mixer core on header pins 8 and 10, 115200 baud, with the console kept off it.
 - **Read-only card.** After its first start nothing writes to the microSD card, not even while starting up, and the power can be pulled at any time.
@@ -55,17 +55,34 @@ Any password you left blank is made up on that first start and written into `cam
     WIFI_RADIO=auto              auto, usb or onboard
     LOGIN_PASSWORD=              read once, on the first start
 
-How the radio decides, at every start:
+How the radio decides:
 
-1. If a listed network is in range, join it. Phones on that network open http://mixer.local.
-2. If none is in range, or the password is wrong, run the mixer's own network.
-3. If a joined network drops out for 30 seconds, switch to the mixer's own network and stay there until the next start.
+1. At start-up, if a listed network is in range, join it. Phones on that network open http://mixer.local.
+2. If none is in range, run the mixer's own network.
+3. If a joined network drops out for 30 seconds, switch to the mixer's own network.
+4. While on its own network with networks listed, it keeps an eye out for them, but only when nobody is connected to it. After a minute with nobody on, it leaves its own network for about ten seconds to look. If it finds nothing it looks again after 5 minutes of nobody, then 10, 20, 40, and hourly from there. It never looks while a phone is connected.
+5. A listed network that refuses the mixer (wrong password, say) is left alone for half an hour.
+
+So a venue network that comes up after the mixer, or comes back after an outage, is picked up again without a restart, as long as nobody is using the mixer's own network at the time. `sudo campmixer wifi join` looks straight away.
 
 One radio does one job at a time, so while it is on a venue's Wi-Fi the `CampMixer` network is not there. Ethernet is separate and always works alongside either.
 
-Networks that need a username, or a sign-in web page, cannot be joined.
+Cannot be joined: networks that need a username, networks with a sign-in web page, hidden networks, and WPA3-only networks (WPA2, and mixed WPA2/WPA3, are fine).
+
+A phone on the mixer's own network will say it has no internet, because it has none unless the mixer's Ethernet port is plugged into a network that does. Tell the phone to stay connected anyway.
+
+Save the file as plain text in UTF-8, which is what Notepad and TextEdit do by default now. A file in another encoding is still read, but a name with an accent or a curly apostrophe in it (`Jordan’s iPhone`) will not match the real network, and `campmixer wifi` says so.
 
 There is no built-in Wi-Fi password. If `WIFI_PASSWORD` is blank or cannot be used (it needs 8 to 63 characters), the mixer makes one up at start-up and writes it into the file. The commands refuse a value the mixer could not use, and change nothing.
+
+## Who can reach it
+
+The web page and the mixer controls behind it have no log-in of their own.
+
+- On the mixer's own Wi-Fi, the Wi-Fi password is the lock.
+- On a venue's Wi-Fi or on Ethernet, **anyone on that network can open the page**. That is harmless while the page only shows status. It needs a PIN before real mixer controls go on it.
+- A web site out on the internet cannot reach in through someone's browser: the mixer answers only to its own name (`mixer.local`, `mixer`, `mixer.lan` and the like) or its address.
+- SSH needs the login password, on every network.
 
 ## Commands
 

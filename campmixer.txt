@@ -14,10 +14,11 @@ WIFI_BAND=2.4
 WIFI_CHANNEL=6
 
 # ---- Wi-Fi networks to join ----
-# When one of these is in range at start-up, the mixer joins it and sits on that network,
+# When one of these is in range, the mixer joins it and sits on that network,
 # and phones on the same network open http://mixer.local
-# If none is in range, or the network drops out for 30 seconds, it runs its own network instead.
-# Leave the password blank for an open network.
+# If none is in range, or the network drops out for 30 seconds, it runs its own network instead,
+# and looks for these again whenever nobody is connected to its own.
+# Type the name exactly as phones show it. Leave the password blank for an open network.
 JOIN_WIFI_1=
 JOIN_WIFI_1_PASSWORD=
 JOIN_WIFI_2=

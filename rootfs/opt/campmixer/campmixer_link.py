@@ -89,8 +89,9 @@ class FrameDecoder:
     """Feed it whatever bytes arrive; it hands back the payloads of complete, valid frames."""
 
     def __init__(self, max_payload=MAX_PAYLOAD):
-        body = max_payload + 2
-        self._limit = body + body // 254 + 2
+        body = max_payload + 2  # payload and its CRC
+        self._body_limit = body
+        self._limit = body + body // 254 + 2  # the same once encoded, which is what sits in the buffer
         self._buffer = bytearray()
         self._discarding = False
         self.frames = 0
@@ -121,7 +122,7 @@ class FrameDecoder:
             except ValueError:
                 self.format_errors += 1
                 continue
-            if len(body) < 3 or len(body) > self._limit:
+            if len(body) < 3 or len(body) > self._body_limit:
                 self.format_errors += 1
                 continue
             payload, received = body[:-2], int.from_bytes(body[-2:], "big")

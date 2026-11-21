@@ -14,10 +14,13 @@ import asyncio
 import base64
 import contextlib
 import hashlib
+import html
+import ipaddress
 import json
 import logging
 import mimetypes
 import os
+import re
 import signal
 import socket
 import struct
@@ -239,11 +242,39 @@ class Client:
             self.open = False
 
 
+LOCAL_ONLY_SUFFIXES = (".local", ".lan", ".home", ".internal", ".localdomain", ".home.arpa", ".localhost")
+
+
+def is_own_name(host):
+    """Whether a request's Host header is one that can only have been reached from inside the local network.
+
+    A web page on the internet can point its own domain name at the mixer's address, and a browser then
+    treats that page and the mixer as one site (DNS rebinding), so the page could work the mixer. That
+    takes a public domain name. A bare address, a name without dots and a name under one of the suffixes
+    used only inside local networks cannot be set up from outside, so those are the names answered to.
+    """
+    host = host.strip().lower()
+    if not host:
+        return True  # no Host header at all: not a browser, so not some other site's page
+    if host.startswith("["):
+        return "]" in host  # an IPv6 address
+    name = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+    name = name.rstrip(".")
+    try:
+        ipaddress.ip_address(name)
+        return True
+    except ValueError:
+        pass
+    if not re.fullmatch(r"[a-z0-9_-]+(\.[a-z0-9_-]+)*", name):
+        return False
+    return "." not in name or name.endswith(LOCAL_ONLY_SUFFIXES)
+
+
 def root_is_overlay(mounts="/proc/self/mounts"):
     """True when the card is locked: the system is running on a layer in memory over a read-only card."""
     locked = False
     try:
-        with open(mounts) as handle:
+        with open(mounts, errors="replace") as handle:
             for line in handle:
                 fields = line.split()
                 if len(fields) >= 3 and fields[1] == "/":
@@ -408,6 +439,9 @@ class Bridge:
                 headers[name.strip().lower()] = value.strip()
         path = target.split("?", 1)[0]
 
+        if not is_own_name(headers.get("host", "")):
+            await self.respond(writer, 403, self.wrong_name_page(), "text/html; charset=utf-8", method == "HEAD")
+            return
         if path == "/ws":
             await self.websocket(reader, writer, method, headers)
             return
@@ -427,6 +461,17 @@ class Bridge:
         if ctype.startswith("text/") or ctype in ("application/json", "application/manifest+json"):
             ctype += "; charset=utf-8"
         await self.respond(writer, 200, target_file.read_bytes(), ctype, head_only)
+
+    def wrong_name_page(self):
+        """What a browser gets if it asked for this mixer under a name that could belong to another site."""
+        name = socket.gethostname()
+        links = ["http://%s.local/" % name] + ["http://%s/" % entry["address"] for entry in self.network["addresses"]]
+        items = "".join('<li><a href="%s">%s</a></li>' % (html.escape(link, quote=True), html.escape(link)) for link in links)
+        return (
+            "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
+            "<title>CampMixer</title><p>The mixer answers only to its own name or address. Open one of these instead:</p>"
+            "<ul>%s</ul>" % items
+        ).encode()
 
     # ----- WebSocket -----
 
@@ -547,8 +592,15 @@ async def run(args):
     ]
     LOG.info("CampMixer bridge %s serving %s on port %d", bridge.version, bridge.www, args.port)
     sd_notify("READY=1")
-    await stop.wait()
+    # Run until told to stop. Should one of the background jobs ever end by itself, stop as well and let
+    # systemd start a fresh bridge, rather than carry on half-working with nothing to show for it.
+    stopping = asyncio.create_task(stop.wait())
+    done, _pending = await asyncio.wait([stopping, *tasks], return_when=asyncio.FIRST_COMPLETED)
+    broken = [task for task in done if task is not stopping]
+    for task in broken:
+        LOG.error("a background job ended by itself: %r", None if task.cancelled() else task.exception())
     sd_notify("STOPPING=1")
+    stopping.cancel()
     for task in tasks:
         task.cancel()
     server.close()
@@ -556,6 +608,7 @@ async def run(args):
         client.send(0x8, struct.pack("!H", 1001))
     await asyncio.sleep(0.1)
     bridge.serial.close()
+    return 1 if broken else 0
 
 
 def main():
@@ -567,7 +620,7 @@ def main():
     parser.add_argument("--baud", type=int, default=115200, choices=sorted(BAUD_RATES))
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
-    asyncio.run(run(args))
+    sys.exit(asyncio.run(run(args)))
 
 
 if __name__ == "__main__":

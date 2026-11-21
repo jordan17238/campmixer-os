@@ -71,4 +71,19 @@ assert done.returncode == 1 and "could not set the login password" in done.stder
 assert not os.path.exists(root + "/var/lib/campmixer/login-password-set")
 assert read("/boot/firmware/campmixer.txt") == "WIFI_PASSWORD=long enough\nLOGIN_PASSWORD=\n"
 
+# A settings file saved in an old Windows encoding, passwords left blank. Build 2 crashed here, after setting a
+# login password it then never wrote down. It has to finish, and the made-up passwords have to be in the file.
+run, read, root = first_start("WIFI_PASSWORD=\nLOGIN_PASSWORD=\n")
+with open(root + "/boot/firmware/campmixer.txt", "wb") as handle:
+    handle.write(b"# Jordan\x92s mixer\r\nWIFI_PASSWORD=\r\nLOGIN_PASSWORD=\r\nJOIN_WIFI_1=Caf\xe9\r\n")
+done = run()
+assert done.returncode == 0 and "Traceback" not in done.stderr, done.stderr
+with open(root + "/boot/firmware/campmixer.txt", "rb") as handle:
+    after = handle.read()
+login = re.search(rb"^LOGIN_PASSWORD=(%s)$" % MADE_UP.encode(), after, re.M)
+assert login and re.search(rb"^WIFI_PASSWORD=%s$" % MADE_UP.encode(), after, re.M), after
+assert read("/chpasswd.log") == "mixer:%s\n" % login.group(1).decode()  # the one that was set is the one written down
+assert after.startswith(b"# Jordan\x92s mixer\n") and b"JOIN_WIFI_1=Caf\xe9\n" in after  # the rest is as it was typed
+assert os.path.exists(root + "/var/lib/campmixer/login-password-set")
+
 print("first start: all checks passed")

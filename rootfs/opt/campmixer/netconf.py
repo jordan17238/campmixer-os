@@ -33,6 +33,7 @@ NM_STATE = ROOT / "var/lib/NetworkManager/NetworkManager.state"
 SYS_NET = Path(os.environ.get("CAMPMIXER_SYS_NET", "/sys/class/net"))
 SYS_USB = Path(os.environ.get("CAMPMIXER_SYS_USB", str(ROOT / "sys/bus/usb/devices")))
 NMCLI = os.environ.get("CAMPMIXER_NMCLI", "nmcli")
+IW = os.environ.get("CAMPMIXER_IW", "iw")
 TIME_SCALE = float(os.environ.get("CAMPMIXER_TIME_SCALE", "1"))
 
 AP_ADDRESS = "10.77.7.1/24"
@@ -46,6 +47,12 @@ PASSWORD_LETTERS = "abcdefghjkmnpqrstuvwxyz23456789"  # none that look alike
 ONBOARD_DRIVERS = ("brcmfmac",)
 CHANNELS = {"2.4": tuple(range(1, 14)), "5": (36, 40, 44, 48, 149, 153, 157, 161, 165)}
 DEFAULT_CHANNEL = {"2.4": 6, "5": 36}
+POLL_S = 5
+# With networks to join listed: how long the mixer's own network must have had nobody on it before the
+# radio leaves it for a few seconds to look for one of them. Longer each time a look finds nothing.
+LOOK_AFTER_IDLE_S = (60, 300, 600, 1200, 2400, 3600)
+RETRY_REFUSED_S = 1800  # a listed network that would not let the mixer in is left alone this long
+LOOK_NOW_FLAG = ROOT / "run/campmixer-look-now"
 KNOWN_KEYS = ["WIFI_NAME", "WIFI_PASSWORD", "WIFI_BAND", "WIFI_CHANNEL", "WIFI_RADIO", "LOGIN_PASSWORD"] + [
     key for slot in range(1, JOIN_SLOTS + 1) for key in ("JOIN_WIFI_%d" % slot, "JOIN_WIFI_%d_PASSWORD" % slot)
 ]
@@ -79,8 +86,28 @@ def parse_file(text):
     return values
 
 
+def decode_settings(data, keep_bytes=False):
+    """The settings file's text, and whether all of it could be read.
+
+    The file is edited by hand on whatever computer is nearby, and Notepad on older Windows saves in a local
+    encoding rather than UTF-8. That must never stop the mixer: what cannot be read becomes a replacement
+    character (or, with keep_bytes, a stand-in that turns back into the same byte when the file is rewritten).
+    """
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):  # Notepad's "Unicode": UTF-16 with its marker
+        with contextlib.suppress(UnicodeDecodeError):
+            return data.decode("utf-16"), True
+    try:
+        return data.decode("utf-8-sig"), True
+    except UnicodeDecodeError:
+        return data.decode("utf-8-sig", errors="surrogateescape" if keep_bytes else "replace"), False
+
+
+def read_settings_text():
+    return decode_settings(SETTINGS_FILE.read_bytes())
+
+
 def read_raw():
-    return parse_file(SETTINGS_FILE.read_text(encoding="utf-8-sig", errors="replace"))
+    return parse_file(read_settings_text()[0])
 
 
 def valid_name(name):
@@ -120,7 +147,13 @@ def load_settings(raw=None):
     settings = Settings()
     if raw is None:
         try:
-            raw = read_raw()
+            text, all_utf8 = read_settings_text()
+            raw = parse_file(text)
+            if not all_utf8:
+                settings.issues.append(
+                    ("FILE", "campmixer.txt is not saved as UTF-8, so an accent or a curly quote in a name will not match; "
+                     "save it as UTF-8 or type plain characters")
+                )
         except OSError as exc:
             settings.issues.append(("FILE", "cannot read %s (%s); using the built-in settings" % (SETTINGS_FILE, exc.strerror)))
             raw = {}
@@ -191,7 +224,7 @@ def writable_boot():
     read_only = False
     if not TESTING:
         with contextlib.suppress(OSError):
-            for line in Path("/proc/mounts").read_text().splitlines():
+            for line in Path("/proc/mounts").read_text(errors="replace").splitlines():
                 fields = line.split()
                 if len(fields) >= 4 and fields[1] == str(BOOT):
                     read_only = "ro" in fields[3].split(",")
@@ -210,15 +243,16 @@ def write_if_changed(path, text, mode=None):
 
     mode is left out for files on the boot partition: FAT has no permissions to set.
     """
+    data = text.encode("utf-8", errors="surrogateescape")  # bytes that were not UTF-8 go back out as they came in
     with contextlib.suppress(OSError):
-        if path.read_text() == text and (mode is None or (path.stat().st_mode & 0o777) == mode):
+        if path.read_bytes() == data and (mode is None or (path.stat().st_mode & 0o777) == mode):
             return False
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(path.name + ".tmp")
     try:
         fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600 if mode is None else mode)
-        with os.fdopen(fd, "w") as handle:
-            handle.write(text)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
         if mode is not None:
@@ -234,7 +268,8 @@ def write_if_changed(path, text, mode=None):
 def update_file(changes):
     """Change KEY=VALUE lines in campmixer.txt and keep every other line as it was."""
     try:
-        lines = SETTINGS_FILE.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+        # Lines that are not being changed are written back as they were, whatever encoding they are in.
+        lines = decode_settings(SETTINGS_FILE.read_bytes(), keep_bytes=True)[0].splitlines()
     except OSError:
         lines = ["# CampMixer settings"]
     pending = dict(changes)
@@ -323,23 +358,50 @@ def join_profile(slot, name, password):
     ).format(id=profile_id, uuid=profile_uuid(profile_id), priority=200 - slot, ssid=kf_ssid(name), security=security)
 
 
-def eth_profile():
-    # One try at DHCP. If nothing answers in 30 s, campmixer-eth-direct takes over.
-    return HEADER + (
-        "[connection]\nid={id}\nuuid={uuid}\ntype=ethernet\nautoconnect=true\nautoconnect-priority=50\n"
-        "autoconnect-retries=1\n\n"
-        "[ipv4]\ndhcp-timeout=30\nmay-fail=false\nmethod=auto\n\n"
-        "[ipv6]\nmethod=auto\n"
-    ).format(id=ETH_PROFILE, uuid=profile_uuid(ETH_PROFILE))
+def nm_version():
+    """NetworkManager's version as (major, minor), or None if it cannot be asked (as in the tests)."""
+    text = os.environ.get("CAMPMIXER_NM_VERSION", "")
+    if not text and not TESTING:
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            text = subprocess.run(["NetworkManager", "--version"], capture_output=True, text=True, timeout=10).stdout
+    match = re.match(r"\s*(\d+)\.(\d+)", text)
+    return (int(match.group(1)), int(match.group(2))) if match else None
 
 
-def eth_direct_profile():
-    # A cable straight to a laptop: both ends pick a 169.254.x.x address and mixer.local still works.
-    return HEADER + (
-        "[connection]\nid={id}\nuuid={uuid}\ntype=ethernet\nautoconnect=true\nautoconnect-priority=40\n\n"
-        "[ipv4]\nmethod=link-local\n\n"
-        "[ipv6]\nmethod=link-local\n"
-    ).format(id=ETH_DIRECT_PROFILE, uuid=profile_uuid(ETH_DIRECT_PROFILE))
+def eth_profiles():
+    """The wired profile or profiles, as {name: text}.
+
+    NetworkManager 1.52 and later, which is what the image has: one profile. DHCP never gives up, and for as
+    long as it has no address the port has a link-local one (169.254.x.x). A cable straight to a laptop works
+    within seconds, and a DHCP server that turns up later is still picked up, without touching the cable.
+    (Tried on 1.52.1: link-local address 2 s after plugging in, DHCP address 20 s after a server appeared.)
+
+    Older versions cannot do that in one profile, so they get two: one try at DHCP, then a link-local profile
+    takes over and stays until the cable is next unplugged.
+    """
+    version = nm_version()
+    if version is None or version >= (1, 52):
+        return {
+            ETH_PROFILE: HEADER + (
+                "[connection]\nid={id}\nuuid={uuid}\ntype=ethernet\nautoconnect=true\nautoconnect-priority=50\n"
+                "multi-connect=3\n\n"  # every wired port may use it at once, should a second one be added
+                "[ipv4]\ndhcp-timeout=2147483647\nlink-local=4\nmay-fail=true\nmethod=auto\n\n"
+                "[ipv6]\nmethod=link-local\n"
+            ).format(id=ETH_PROFILE, uuid=profile_uuid(ETH_PROFILE))
+        }
+    return {
+        ETH_PROFILE: HEADER + (
+            "[connection]\nid={id}\nuuid={uuid}\ntype=ethernet\nautoconnect=true\nautoconnect-priority=50\n"
+            "autoconnect-retries=1\n\n"
+            "[ipv4]\ndhcp-timeout=30\nmay-fail=false\nmethod=auto\n\n"
+            "[ipv6]\nmethod=auto\n"
+        ).format(id=ETH_PROFILE, uuid=profile_uuid(ETH_PROFILE)),
+        ETH_DIRECT_PROFILE: HEADER + (
+            "[connection]\nid={id}\nuuid={uuid}\ntype=ethernet\nautoconnect=true\nautoconnect-priority=40\n\n"
+            "[ipv4]\nmethod=link-local\n\n"
+            "[ipv6]\nmethod=link-local\n"
+        ).format(id=ETH_DIRECT_PROFILE, uuid=profile_uuid(ETH_DIRECT_PROFILE)),
+    }
 
 
 def wifi_devices():
@@ -412,7 +474,7 @@ def apply(starting_up=False):
     found = ", ".join("%s (%s)" % dev for dev in devices) or "none"
     log("radios found: %s; using %s" % (found, "%s (%s)" % chosen if chosen else "none"))
 
-    wanted = {ETH_PROFILE: eth_profile(), ETH_DIRECT_PROFILE: eth_direct_profile()}
+    wanted = eth_profiles()
     if settings.password:
         wanted[AP_PROFILE] = ap_profile(settings)
     for slot, name, password in settings.joins:
@@ -427,7 +489,7 @@ def apply(starting_up=False):
 
     # The mixer's whole job on this radio is Wi-Fi, so never start with it switched off.
     with contextlib.suppress(OSError):
-        state = NM_STATE.read_text()
+        state = NM_STATE.read_text(errors="replace")
         if "WirelessEnabled=false" in state:
             write_if_changed(NM_STATE, state.replace("WirelessEnabled=false", "WirelessEnabled=true"), 0o644)
     return 0
@@ -480,12 +542,15 @@ def joined(state):
     return bool(state) and state[2].startswith(JOIN_PREFIX) and state[1] == "connected"
 
 
+def on_own(state):
+    return bool(state) and state[2] == AP_PROFILE and state[1] == "connected"
+
+
 def start_own(device):
     if load_settings().password is None:
         log("the mixer's own Wi-Fi is off: WIFI_PASSWORD in campmixer.txt is not usable")
         return False
-    state = wifi_state()
-    if state and state[2] == AP_PROFILE and state[1] == "connected":
+    if on_own(wifi_state()):
         return True
     code, out = nmcli("--wait", "30", "connection", "up", "id", AP_PROFILE, "ifname", device, timeout=45)
     if code != 0:
@@ -495,54 +560,134 @@ def start_own(device):
     return code == 0
 
 
-def follow_venue(device, joins):
-    # NetworkManager may already be joining one of the listed networks by itself.
-    state = None
-    for _ in range(10):
+def stations(device):
+    """How many phones are on the mixer's own network, or None if that cannot be told."""
+    try:
+        done = subprocess.run([IW, "dev", device, "station", "dump"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return None
+    return sum(1 for line in done.stdout.splitlines() if line.startswith("Station "))
+
+
+def scan(device):
+    """Names of the Wi-Fi networks in range. Empty if the radio would not look."""
+    out = ""
+    for _ in range(5):
+        code, out = nmcli("-t", "-f", "SSID", "device", "wifi", "list", "ifname", device, "--rescan", "yes", timeout=30)
+        if code == 0:
+            return {split_terse(line)[0] for line in out.splitlines() if line}
+        pause(2)  # NetworkManager refuses to scan while a connection is still coming up or going down
+    log("the radio would not scan: " + out.strip())
+    return set()
+
+
+def settle(device):
+    """Let NetworkManager finish what it does by itself at start-up.
+
+    It joins a listed network if it can see one and starts the mixer's own if it cannot. Stepping in while
+    it is still busy would cut a slow join short, so this only watches, and acts if nothing comes of it.
+    """
+    quiet = 0
+    for _ in range(90):
         state = wifi_state()
         if state and state[1] == "connected":
-            break
-        pause(1)
-    if not joined(state):
-        if state and state[2] == AP_PROFILE:
-            nmcli("connection", "down", "id", AP_PROFILE)  # a radio that is an access point cannot look around
-            pause(1)
-        _code, out = nmcli("-t", "-f", "SSID", "device", "wifi", "list", "ifname", device, "--rescan", "yes", timeout=30)
-        visible = {split_terse(line)[0] for line in out.splitlines() if line}
-        target = next(((profile, name) for profile, name in joins if name in visible), None)
-        connected = False
-        if target:
-            log("found %s; joining it" % target[1])
-            code, out = nmcli("--wait", "40", "connection", "up", "id", target[0], "ifname", device, timeout=55)
-            connected = code == 0
-            if not connected:
-                log("could not join %s: %s" % (target[1], out.strip()))
+            return
+        if state and state[1].startswith("connecting"):
+            quiet = 0
         else:
-            log("none of the listed Wi-Fi networks is in range")
-        if not connected:
-            start_own(device)
-            return 0
+            quiet += 1
+            if quiet >= 20:
+                break
+        pause(1)
+    log("NetworkManager has not brought any Wi-Fi up by itself")
+    start_own(device)
 
-    log("on a listed Wi-Fi network; watching the connection")
-    lost = 0
+
+def look(device, candidates):
+    """Look for a listed network, which a radio cannot do while it is an access point.
+
+    Returns (profile, name, joined). With nothing joined, the mixer's own network is running again.
+    """
+    nmcli("connection", "down", "id", AP_PROFILE)
+    visible = scan(device)
+    target = next(((profile, name) for profile, name in candidates if name in visible), None)
+    if not target:
+        log("none of the listed Wi-Fi networks is in range")
+        start_own(device)
+        return None, None, False
+    log("found %s; joining it" % target[1])
+    code, out = nmcli("--wait", "45", "connection", "up", "id", target[0], "ifname", device, timeout=60)
+    if code != 0:
+        log("could not join %s: %s" % (target[1], out.strip()))
+        start_own(device)
+    return target[0], target[1], code == 0
+
+
+def keep_wifi(device, joins, look_now=False):
+    """The radio's job when there are networks to join. Never returns unless a test asks it to.
+
+    On a listed network: stay, and start the mixer's own if it is lost for 30 s.
+    On the mixer's own: once nobody has been connected for a while, take a look for a listed network.
+    A look takes the own network away for some seconds, so it waits longer each time it finds nothing.
+    """
+    names = dict(joins)
+    retry_at = {}  # profile -> when a network that refused the mixer may be tried again
+    clock = idle = lost = looks = 0
+    was = None
+    rounds = int(os.environ.get("CAMPMIXER_RADIO_ROUNDS", "0"))  # tests only: stop after this many turns
+    turn = 0
     while True:
-        pause(5)
         state = wifi_state()
+        if state:
+            device = state[0]  # a USB adaptor that was unplugged and put back can return under another name
         if joined(state):
+            if was != state[2]:
+                log("on the listed Wi-Fi network %s" % names.get(state[2], state[2]))
+            was = state[2]
+            idle = lost = looks = 0
+        elif on_own(state) or look_now:
+            if was != AP_PROFILE and not look_now:
+                log("on the mixer's own Wi-Fi")
+            was = AP_PROFILE
             lost = 0
-            continue
-        if state and state[2] == AP_PROFILE and state[1] == "connected":
-            log("NetworkManager has switched to the mixer's own Wi-Fi")
+            candidates = [(profile, name) for profile, name in joins if retry_at.get(profile, 0) <= clock]
+            # Zero means nobody. None means it cannot be told, and then the network is left alone.
+            idle = idle + POLL_S if stations(device) == 0 else 0
+            due = idle >= LOOK_AFTER_IDLE_S[min(looks, len(LOOK_AFTER_IDLE_S) - 1)]
+            if (due or look_now) and candidates:
+                if look_now:
+                    log("the list of networks has changed; looking for one of them")
+                else:
+                    log("nobody has been on the mixer's own Wi-Fi for %d s; looking for a listed network" % idle)
+                    looks += 1
+                profile, _name, ok = look(device, candidates)
+                if profile and not ok:
+                    retry_at[profile] = clock + RETRY_REFUSED_S
+                idle = 0
+                was = None
+        else:
+            # Neither. NetworkManager may be reconnecting by itself; give it 30 s before stepping in.
+            lost += POLL_S
+            if lost >= 30:
+                log("no Wi-Fi connection for 30 s; starting the mixer's own")
+                start_own(device)
+                lost = 0
+        look_now = False
+        turn += 1
+        if rounds and turn >= rounds:
             return 0
-        lost += 5
-        if lost >= 30:
-            log("the Wi-Fi network has been gone for 30 s; starting the mixer's own")
-            start_own(device)
-            return 0
+        pause(POLL_S)
+        clock += POLL_S
 
 
 def radio():
     settings = load_settings()
+    look_now = False
+    with contextlib.suppress(OSError):
+        LOOK_NOW_FLAG.unlink()  # left by "campmixer wifi join": the list has just changed, so look straight away
+        look_now = True
     state = None
     for _ in range(30):
         state = wifi_state()
@@ -557,14 +702,15 @@ def radio():
     if not joins:
         # NetworkManager starts the mixer's own network by itself. Step in only if it has not.
         for _ in range(20):
-            state = wifi_state()
-            if state and state[1] == "connected":
+            if on_own(wifi_state()):
                 return 0
             pause(1)
         start_own(device)
         return 0
     try:
-        return follow_venue(device, joins)
+        if not look_now:
+            settle(device)
+        return keep_wifi(device, joins, look_now)
     except Exception as exc:  # whatever goes wrong, do not leave the mixer without Wi-Fi
         log("unexpected error (%s); starting the mixer's own Wi-Fi" % exc)
         start_own(device)

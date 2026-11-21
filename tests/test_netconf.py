@@ -98,14 +98,26 @@ root = make_root(BASE, [ONBOARD])
 done = run(root, "apply")
 assert done.returncode == 0, done.stderr
 assert "using wlan0 (brcmfmac)" in done.stderr
-assert profiles(root) == ["campmixer-ap", "campmixer-eth", "campmixer-eth-direct"]
+assert profiles(root) == ["campmixer-ap", "campmixer-eth"]
 ap = profile(root, "campmixer-ap")
 assert ap["wifi"] == {"band": "bg", "channel": "6", "mode": "ap", "powersave": "2", "ssid": "CampMixer"}
 assert ap["wifi-security"]["psk"] == "abcd-efgh-jkmn" and ap["wifi-security"]["key-mgmt"] == "wpa-psk"
 assert ap["ipv4"] == {"address1": "10.77.7.1/24", "method": "shared"}
 assert ap["connection"]["autoconnect-priority"] == "100"
-assert profile(root, "campmixer-eth")["ipv4"] == {"dhcp-timeout": "30", "may-fail": "false", "method": "auto"}
-assert profile(root, "campmixer-eth-direct")["ipv4"] == {"method": "link-local"}
+# The wired port: DHCP that never gives up, with a link-local address for as long as it has none.
+eth = profile(root, "campmixer-eth")
+assert eth["ipv4"] == {"dhcp-timeout": "2147483647", "link-local": "4", "may-fail": "true", "method": "auto"}, eth["ipv4"]
+assert eth["ipv6"] == {"method": "link-local"} and eth["connection"]["multi-connect"] == "3", eth
+# NetworkManager before 1.52 cannot do that in one profile, so it gets the pair the first builds used. Going from
+# the pair to the single profile (a card made by build 1 or 2) removes the second one.
+older = make_root(BASE, [ONBOARD])
+assert run(older, "apply", CAMPMIXER_NM_VERSION="1.42.4").returncode == 0
+assert profiles(older) == ["campmixer-ap", "campmixer-eth", "campmixer-eth-direct"]
+assert profile(older, "campmixer-eth")["ipv4"] == {"dhcp-timeout": "30", "may-fail": "false", "method": "auto"}
+assert profile(older, "campmixer-eth-direct")["ipv4"] == {"method": "link-local"}
+assert run(older, "apply", CAMPMIXER_NM_VERSION="1.52.1\n").returncode == 0
+assert profiles(older) == ["campmixer-ap", "campmixer-eth"] and profile(older, "campmixer-eth")["ipv4"]["link-local"] == "4"
+assert run(older, "apply", CAMPMIXER_NM_VERSION="2.0.0").returncode == 0 and profiles(older) == ["campmixer-ap", "campmixer-eth"]
 assert "match-device" not in conf(root)
 assert oct(os.stat(profile_path(root, "campmixer-ap")).st_mode & 0o777) == "0o600"
 
@@ -160,7 +172,7 @@ joins = make_root(
     BASE + "JOIN_WIFI_1=Church Hall\nJOIN_WIFI_1_PASSWORD=hall-password\nJOIN_WIFI_2=Open Net\n"
     "JOIN_WIFI_3=Bad\nJOIN_WIFI_3_PASSWORD=short\nJOIN_WIFI_4=CampMixer\n", [USB])
 done = run(joins, "apply")
-assert profiles(joins) == ["campmixer-ap", "campmixer-eth", "campmixer-eth-direct", "campmixer-join-1", "campmixer-join-2"]
+assert profiles(joins) == ["campmixer-ap", "campmixer-eth", "campmixer-join-1", "campmixer-join-2"]
 hall = profile(joins, "campmixer-join-1")
 assert hall["wifi"] == {"mode": "infrastructure", "ssid": "Church Hall"} and hall["wifi-security"]["psk"] == "hall-password"
 assert hall["connection"]["autoconnect-priority"] == "199" and hall["ipv4"] == {"method": "auto"}
@@ -191,6 +203,46 @@ done = run(missing, "apply")
 assert done.returncode == 0, done.stderr
 made_up = re.search(r"^WIFI_PASSWORD=(%s)$" % MADE_UP, settings_file(missing), re.M)
 assert made_up and profile(missing, "campmixer-ap")["wifi-security"]["psk"] == made_up.group(1)
+
+# A settings file saved in an old Windows encoding (Notepad's "ANSI") must not stop anything. Build 2 crashed here.
+def raw_root(data):
+    root_dir = make_root(None, [USB])
+    with open(root_dir + "/boot/firmware/campmixer.txt", "wb") as handle:
+        handle.write(data)
+    return root_dir
+
+
+def raw_settings(root_dir):
+    with open(root_dir + "/boot/firmware/campmixer.txt", "rb") as handle:
+        return handle.read()
+
+
+ansi = raw_root(b"# Jordan\x92s mixer\r\nWIFI_NAME=Caf\xe9 PA\r\nWIFI_PASSWORD=\r\nJOIN_WIFI_1=Jordan\x92s iPhone\r\n")
+done = run(ansi, "apply")
+assert done.returncode == 0 and "Traceback" not in done.stderr, done.stderr
+assert "not saved as UTF-8" in done.stderr and "WIFI_PASSWORD was blank" in done.stderr, done.stderr
+after = raw_settings(ansi)
+assert after.startswith(b"# Jordan\x92s mixer\nWIFI_NAME=Caf\xe9 PA\nWIFI_PASSWORD=") and after.endswith(b"JOIN_WIFI_1=Jordan\x92s iPhone\n"), after
+assert re.search(rb"^WIFI_PASSWORD=[a-z2-9]{4}-[a-z2-9]{4}-[a-z2-9]{4}$", after, re.M), after  # untouched lines byte for byte
+assert "campmixer-ap" in profiles(ansi) and "campmixer-join-1" in profiles(ansi)
+done = run(ansi, "set", "WIFI_NAME=Camp PA")
+assert done.returncode == 0 and "PROBLEM" in done.stdout + done.stderr, (done.stdout, done.stderr)  # saved, and the encoding is pointed out
+assert b"WIFI_NAME=Camp PA\n" in raw_settings(ansi) and b"JOIN_WIFI_1=Jordan\x92s iPhone\n" in raw_settings(ansi)
+shown = run(ansi, "show")
+assert shown.returncode == 1 and "not saved as UTF-8" in shown.stdout, shown.stdout
+bom = raw_root(b"\xef\xbb\xbfWIFI_NAME=Caf\xc3\xa9 PA\r\nWIFI_PASSWORD=long enough\r\n")  # Notepad's UTF-8 with a marker
+done = run(bom, "apply")
+assert done.returncode == 0 and "UTF-8" not in done.stderr, done.stderr
+assert profile(bom, "campmixer-ap")["wifi"]["ssid"] == "".join("%d;" % byte for byte in "Café PA".encode()), profile(bom, "campmixer-ap")["wifi"]
+utf16 = raw_root("# Jordan’s\r\nWIFI_NAME=Camp\r\nWIFI_PASSWORD=long enough\r\n".encode("utf-16"))  # Notepad's "Unicode"
+done = run(utf16, "apply")
+assert done.returncode == 0 and "UTF-8" not in done.stderr, done.stderr
+assert profile(utf16, "campmixer-ap")["wifi-security"]["psk"] == "long enough" and profile(utf16, "campmixer-ap")["wifi"]["ssid"] == "Camp"
+assert raw_settings(utf16)[:2] == b"\xff\xfe"  # nothing needed changing, so the file was left exactly as it was
+assert run(utf16, "set", "WIFI_NAME=Camp Two").returncode == 0  # a change rewrites it, as UTF-8
+assert raw_settings(utf16) == "# Jordan’s\nWIFI_NAME=Camp Two\nWIFI_PASSWORD=long enough\n".encode("utf-8"), raw_settings(utf16)
+torn = raw_root(b"\xff\xfeW\x00I\x00\x00\xd8")  # says UTF-16 but is cut off mid-character
+assert run(torn, "apply").returncode == 0 and "campmixer-ap" in profiles(torn)
 
 # If the made-up password cannot be saved, nobody could ever learn it, so the own network stays off instead.
 stuck = make_root(BASE, [USB])
@@ -267,7 +319,10 @@ if NMCLI:
     tricky = make_root('WIFI_NAME="%s"\nWIFI_PASSWORD="%s"\nJOIN_WIFI_1=Café ☕\nJOIN_WIFI_2=16;17;\n'
                        'JOIN_WIFI_2_PASSWORD=%s\n' % (tricky_name, tricky_password, "a" * 64), [USB])
     assert run(tricky, "apply").returncode == 0
-    for root_dir in (root, joins, tricky, bad):
+    # The wired profile is written to suit the NetworkManager it will run under, so check the one for this machine's.
+    host_nm = subprocess.run([NMCLI, "--version"], capture_output=True, text=True).stdout.split()[-1]
+    for root_dir in (root, joins, tricky, bad, older):
+        assert run(root_dir, "apply", CAMPMIXER_NM_VERSION=host_nm).returncode == 0
         for name in profiles(root_dir):
             ok, output = nm_reads(profile_path(root_dir, name))
             assert ok, (name, output)
@@ -306,15 +361,21 @@ else:
     print("netconf: nmcli not installed, skipped the NetworkManager cross-checks")
 
 
-# --- 8. the radio's decisions, played against a pretend nmcli
-def radio(settings, **state):
+# --- 8. the radio's decisions, played against a pretend nmcli (and a pretend iw)
+def radio(settings, rounds=1, look_now=False, **state):
     root_dir = make_root(settings, [USB])
     state_file = root_dir + "/nm.json"
     start = {"dev": "wlan1", "state": "disconnected", "conn": "", "visible": [], "fail": [], "calls": [], "polls": 0}
     start.update(state)
     with open(state_file, "w") as handle:
         json.dump(start, handle)
-    done = run(root_dir, "radio", CAMPMIXER_NMCLI=FAKE_NMCLI, FAKE_NM_STATE=state_file, CAMPMIXER_TIME_SCALE="0.001")
+    if look_now:
+        os.makedirs(root_dir + "/run")
+        open(root_dir + "/run/campmixer-look-now", "w").close()
+    done = run(root_dir, "radio", CAMPMIXER_NMCLI=FAKE_NMCLI, CAMPMIXER_IW=FAKE_NMCLI, FAKE_NM_STATE=state_file,
+               CAMPMIXER_TIME_SCALE="0.0002", CAMPMIXER_RADIO_ROUNDS=str(rounds))
+    assert "Traceback" not in done.stderr and "unexpected error" not in done.stderr, done.stderr
+    assert not os.path.exists(root_dir + "/run/campmixer-look-now")
     with open(state_file) as handle:
         end = json.load(handle)
     actions = []
@@ -329,34 +390,100 @@ def radio(settings, **state):
 
 
 JOIN = BASE + "JOIN_WIFI_1=Church Hall\nJOIN_WIFI_1_PASSWORD=hall-password\nJOIN_WIFI_2=Camp: Site\n"
+OWN = {"state": "connected", "conn": "campmixer-ap"}
+HALL = {"state": "connected", "conn": "campmixer-join-1"}
+LOOK = ["down", "scan"]  # what a look for a listed network does first
+MINUTE = 12  # turns of the radio's 5 s loop
 
+# Nothing to join: NetworkManager runs the own network by itself, and the radio service only checks.
 done, actions, end = radio(BASE)
 assert done.returncode == 0 and actions == ["up campmixer-ap"], actions
-done, actions, end = radio(BASE, state="connected", conn="campmixer-ap")
-assert actions == [], actions  # already running its own network: leave it alone
-
-# its own network came up first, a listed one is in range: switch to it, then fall back when it drops
-done, actions, end = radio(JOIN, state="connected", conn="campmixer-ap", visible=["Other", "Church Hall"], drop_at=6)
-assert done.returncode == 0 and actions == ["down", "scan", "up campmixer-join-1", "up campmixer-ap"], actions
-assert "gone for 30 s" in done.stderr and end["conn"] == "campmixer-ap"
-
-done, actions, end = radio(JOIN, state="connected", conn="campmixer-ap", visible=["Camp: Site"], drop_at=6)
-assert actions[:3] == ["down", "scan", "up campmixer-join-2"], actions  # a colon in the name survives nmcli's format
-
-done, actions, end = radio(JOIN, state="connected", conn="campmixer-ap", visible=["Somewhere Else"])
-assert actions == ["down", "scan", "up campmixer-ap"] and "in range" in done.stderr, actions
-
-done, actions, end = radio(JOIN, state="connected", conn="campmixer-join-1", drop_at=5)
-assert actions == ["up campmixer-ap"], actions  # NetworkManager had already joined: only the fallback is ours
-
-done, actions, end = radio(JOIN, visible=["Church Hall"], fail=["campmixer-join-1"])
-assert actions == ["scan", "up campmixer-join-1", "up campmixer-ap"] and "could not join" in done.stderr, actions
-
+done, actions, end = radio(BASE, **OWN)
+assert actions == [] and end.get("iw_calls", 0) == 0, actions  # already running its own network: leave it alone
 done, actions, end = radio(JOIN, dev="")
 assert done.returncode == 0 and actions == [] and "Ethernet only" in done.stderr
-
-# no usable password and no way to save one: the own network is not started, and that is said plainly
 done, actions, end = radio("WIFI_PASSWORD=short\n")
 assert done.returncode == 0 and actions == [] and "own Wi-Fi is off" in done.stderr, (actions, done.stderr)
+
+# Start-up, with networks to join. NetworkManager decides first; the radio service watches and does not cut in.
+done, actions, end = radio(JOIN, rounds=3, **HALL)
+assert actions == [] and "on the listed Wi-Fi network Church Hall" in done.stderr, (actions, done.stderr)
+slow = {str(n): {"state": "connecting (getting IP configuration)", "conn": "campmixer-join-1"} for n in range(2, 60)}
+slow["60"] = HALL
+done, actions, end = radio(JOIN, rounds=2, timeline=slow)
+assert actions == [] and end["conn"] == "campmixer-join-1", actions  # a join that takes a minute is left to finish
+done, actions, end = radio(JOIN, rounds=2, timeline={"8": OWN})
+assert actions == [] and "on the mixer's own Wi-Fi" in done.stderr, actions  # it chose the own network: fine too
+done, actions, end = radio(JOIN, rounds=2)
+assert actions == ["up campmixer-ap"] and "has not brought any Wi-Fi up" in done.stderr, actions  # nothing came: step in
+stuck = {str(n): {"state": "connecting (configuring)", "conn": "campmixer-join-1"} for n in range(2, 200)}
+done, actions, end = radio(JOIN, rounds=2, timeline=stuck)
+assert actions == ["up campmixer-ap"], actions  # a join that never finishes is given 90 s, no more
+
+# On the own network with nobody connected: look for a listed network after a minute, then less and less often.
+done, actions, end = radio(JOIN, rounds=MINUTE - 1, visible=["Church Hall"], **OWN)
+assert actions == [], actions  # not yet
+done, actions, end = radio(JOIN, rounds=MINUTE + 1, visible=["Other", "Church Hall"], **OWN)
+assert actions == LOOK + ["up campmixer-join-1"] and end["conn"] == "campmixer-join-1", actions
+assert "nobody has been on the mixer's own Wi-Fi for 60 s" in done.stderr and "found Church Hall" in done.stderr
+done, actions, end = radio(JOIN, rounds=MINUTE + 1, visible=["Camp: Site"], **OWN)
+assert actions == LOOK + ["up campmixer-join-2"], actions  # a colon in the name survives nmcli's format
+done, actions, end = radio(JOIN, rounds=6 * MINUTE - 1, visible=["Somewhere Else"], **OWN)
+assert actions == LOOK + ["up campmixer-ap"] and "in range" in done.stderr, actions  # one look before the 6th minute
+done, actions, end = radio(JOIN, rounds=17 * MINUTE, visible=[], **OWN)
+assert actions == (LOOK + ["up campmixer-ap"]) * 3, actions  # at 1, 6 and 16 minutes
+done, actions, end = radio(JOIN, rounds=17 * MINUTE, visible=[], timeline={str(3 * MINUTE): {"visible": ["Church Hall"]}}, **OWN)
+assert actions == LOOK + ["up campmixer-ap"] + LOOK + ["up campmixer-join-1"], actions  # it turned up later: joined
+assert done.stderr.count("looking for a listed network") == 2 and "for 300 s" in done.stderr, done.stderr
+
+# Somebody is connected to the own network, or that cannot be told: never take it away from them.
+done, actions, end = radio(JOIN, rounds=30 * MINUTE, visible=["Church Hall"], stations=1, **OWN)
+assert actions == [] and end["iw_calls"] > 300, actions
+done, actions, end = radio(JOIN, rounds=30 * MINUTE, visible=["Church Hall"], stations="?", **OWN)
+assert actions == [], actions
+gone_home = {str(10 * MINUTE): {"stations": 0}}
+done, actions, end = radio(JOIN, rounds=11 * MINUTE + 2, visible=["Church Hall"], stations=2, timeline=gone_home, **OWN)
+assert actions == LOOK + ["up campmixer-join-1"], actions  # a minute after the last phone left
+
+# NetworkManager will not scan while a connection is still going down: wait and ask again.
+done, actions, end = radio(JOIN, rounds=MINUTE + 1, visible=["Church Hall"], scan_refusals=3, **OWN)
+assert actions == ["down"] + ["scan"] * 4 + ["up campmixer-join-1"], actions
+done, actions, end = radio(JOIN, rounds=MINUTE + 1, visible=["Church Hall"], scan_refusals=99, **OWN)
+assert actions == ["down"] + ["scan"] * 5 + ["up campmixer-ap"] and "would not scan" in done.stderr, actions
+
+# A listed network that will not let the mixer in: back to the own network, and leave that one alone for half an hour.
+JOIN1 = BASE + "JOIN_WIFI_1=Church Hall\nJOIN_WIFI_1_PASSWORD=wrong-password\n"
+done, actions, end = radio(JOIN1, rounds=20 * MINUTE, visible=["Church Hall"], fail=["campmixer-join-1"], **OWN)
+assert actions == LOOK + ["up campmixer-join-1", "up campmixer-ap"] and "could not join Church Hall" in done.stderr, actions
+done, actions, end = radio(JOIN1, rounds=45 * MINUTE, visible=["Church Hall"], fail=["campmixer-join-1"], **OWN)
+assert actions == (LOOK + ["up campmixer-join-1", "up campmixer-ap"]) * 2, actions  # once more when the half hour is over
+done, actions, end = radio(JOIN, rounds=20 * MINUTE, visible=["Church Hall", "Camp: Site"], fail=["campmixer-join-1"], **OWN)
+assert actions == LOOK + ["up campmixer-join-1", "up campmixer-ap"] + LOOK + ["up campmixer-join-2"], actions  # the other one
+
+# On a listed network that goes away: start the own one after 30 s, then look for the listed one again.
+done, actions, end = radio(JOIN, rounds=9, drop_at=3, **HALL)
+assert actions == ["up campmixer-ap"] and "no Wi-Fi connection for 30 s" in done.stderr, actions
+done, actions, end = radio(JOIN, rounds=5, drop_at=3, **HALL)
+assert actions == [], actions  # not for a short drop-out
+back = {"3": {"state": "disconnected", "conn": ""}, "6": HALL}
+done, actions, end = radio(JOIN, rounds=12, timeline=back, **HALL)
+assert actions == [], actions  # NetworkManager reconnected by itself inside the 30 s
+done, actions, end = radio(JOIN, rounds=9 + MINUTE + 1, drop_at=3, visible=["Church Hall"], **HALL)
+assert actions == ["up campmixer-ap"] + LOOK + ["up campmixer-join-1"], actions
+took_over = {"4": OWN}
+done, actions, end = radio(JOIN, rounds=8, timeline=took_over, **HALL)
+assert actions == [] and "on the mixer's own Wi-Fi" in done.stderr, actions  # NetworkManager fell back by itself
+
+# "campmixer wifi join" asks for a look straight away, even with a phone connected (it is that phone asking).
+done, actions, end = radio(JOIN, rounds=1, look_now=True, visible=["Church Hall"], stations=1, **OWN)
+assert actions == LOOK + ["up campmixer-join-1"] and "list of networks has changed" in done.stderr, actions
+done, actions, end = radio(JOIN, rounds=1, look_now=True, visible=[], stations=1, **OWN)
+assert actions == LOOK + ["up campmixer-ap"], actions
+done, actions, end = radio(JOIN, rounds=1, look_now=True, visible=["Camp: Site"], **HALL)
+assert actions == [], actions  # already on a listed network: stay
+done, actions, end = radio(JOIN, rounds=1, look_now=True, visible=["Church Hall"])
+assert actions == ["down", "scan", "up campmixer-join-1"], actions  # nothing was up; the look still works
+done, actions, end = radio(BASE, look_now=True, **OWN)
+assert actions == [], actions  # nothing listed any more (the last one was forgotten)
 
 print("netconf: all checks passed")

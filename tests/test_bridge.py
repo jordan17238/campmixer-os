@@ -43,6 +43,16 @@ assert lock_state("/dev/mmcblk0p2 /media/root-ro ext4 ro,relatime 0 0\n"
 assert lock_state("/dev/mmcblk0p2 / ext4 rw 0 0\noverlay /var/lib/x/merged overlay rw 0 0\n") is False
 assert lock_state("") is False and bridge.root_is_overlay("/nonexistent/mounts") is False
 
+# The mixer answers only to names that cannot have been set up from outside the local network.
+for own in ("", "mixer", "MIXER", "mixer.local", "Mixer.Local:80", "mixer-2.local", "mixer.lan", "mixer.home", "mixer.home.arpa",
+            "mixer.internal", "mixer.localdomain", "mixer.local.", "localhost:8080", "10.77.7.1", "10.77.7.1:80", "192.168.1.20:8080",
+            "169.254.3.4", "[fe80::1]", "[fe80::1%25eth0]:80", "[::1]:8080"):
+    assert bridge.is_own_name(own), own
+for other in ("evil.example", "evil.example:80", "mixer.evil.example", "mixer.local.evil.example", "mixer.com", "10.77.7.1.evil.example",
+              "10.77.7.1.nip.io", "a.b.c.d", "mixer.fritz.box", "mixer local", "mixer.local/", "mixer.local@evil.example", "evil.example:80:80",
+              "..local", "mixer..local", "[", "é.local"):
+    assert not bridge.is_own_name(other), other
+
 PORT = 18080
 BASE = "http://127.0.0.1:%d" % PORT
 WS = "ws://127.0.0.1:%d/ws" % PORT
@@ -188,6 +198,21 @@ async def main():
                 raise AssertionError("a page from another site was allowed onto the socket")
         except InvalidStatus as exc:
             assert exc.response.status_code == 403
+
+        # A page that points its own domain name at the mixer (DNS rebinding) is told to go away, on every path.
+        key = "dGhlIHNhbXBsZSBub25jZQ=="
+        rebound = raw_http(("GET /ws HTTP/1.1\r\nHost: rebind.attacker.example\r\nOrigin: http://rebind.attacker.example\r\n"
+                            "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\n\r\n" % key).encode())
+        assert rebound.startswith(b"HTTP/1.1 403") and b"101 Switching" not in rebound, rebound[:80]
+        for path in ("/", "/api/status", "/icon.svg"):
+            answer = raw_http(("GET %s HTTP/1.1\r\nHost: rebind.attacker.example\r\n\r\n" % path).encode())
+            assert answer.startswith(b"HTTP/1.1 403") and b"own name or address" in answer and b'"version"' not in answer, (path, answer[:80])
+            assert ("http://%s.local/" % socket.gethostname()).encode() in answer
+        for host in ("mixer.local", "127.0.0.1:%d" % PORT, "mixer.lan", "mixer"):
+            answer = raw_http(("GET /api/status HTTP/1.1\r\nHost: %s\r\n\r\n" % host).encode())
+            assert answer.startswith(b"HTTP/1.1 200") and b'"version"' in answer, (host, answer[:80])
+        assert raw_http(b"GET /api/status HTTP/1.0\r\n\r\n").startswith(b"HTTP/1.1 200")  # no Host header: not a browser
+        assert raw_http(b"HEAD / HTTP/1.1\r\nHost: rebind.attacker.example\r\n\r\n").endswith(b"\r\n\r\n")  # HEAD: no body
 
         time.sleep(0.3)
         assert status()["clients"] == 0

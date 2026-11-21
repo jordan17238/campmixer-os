@@ -85,4 +85,18 @@ for bad_payload in (b"", bytes(MAX_PAYLOAD + 1)):
     else:
         raise AssertionError("accepted a payload of %d bytes" % len(bad_payload))
 
+# The same limit holds for frames coming in: one byte over is not delivered, the limit itself is.
+def frame_of(payload):
+    return cobs_encode(payload + crc16(payload).to_bytes(2, "big")) + b"\x00"
+
+
+strict = FrameDecoder()
+full = rng.randbytes(MAX_PAYLOAD)
+assert strict.feed(frame_of(full)) == [full] and strict.format_errors == 0
+for extra in (1, 2, 6):
+    before = strict.format_errors
+    assert strict.feed(frame_of(rng.randbytes(MAX_PAYLOAD + extra))) == [], extra
+    assert strict.format_errors == before + 1 and strict.crc_errors == 0
+assert strict.feed(frame_of(b"still listening")) == [b"still listening"]
+
 print("link layer: all checks passed")

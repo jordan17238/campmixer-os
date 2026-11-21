@@ -2,6 +2,9 @@
 # campmixer: look after the CampMixer Pi.
 set -u
 
+# iw, findmnt and friends live in sbin, which an ordinary user's PATH leaves out.
+PATH="$PATH:/usr/local/sbin:/usr/sbin:/sbin"
+
 APP=/opt/campmixer
 BOOT=/boot/firmware
 NETCONF="$APP/netconf.py"
@@ -114,16 +117,19 @@ except Exception:
 	fi
 }
 
-reload_wifi() {
+reload_wifi() { # $1 = own (the mixer's own network changed), join (a network was added) or forget
 	systemctl is-active --quiet NetworkManager.service || return 0
 	nmcli general reload >/dev/null 2>&1
 	nmcli connection reload >/dev/null 2>&1
 	echo "Wi-Fi restarts now with the new settings. If you are connected through it, reconnect in about 30 seconds."
 	if [ "$1" = own ] && LC_ALL=C nmcli -t -f TYPE,STATE,CONNECTION device status 2>/dev/null | grep -q '^wifi:connected:campmixer-ap$'; then
+		# Running its own network right now: start it again with the new name, password or channel.
 		nohup nmcli --wait 30 connection up id campmixer-ap >/dev/null 2>&1 &
-	else
-		systemctl restart --no-block campmixer-radio.service
+		return 0
 	fi
+	# A network was just added: have the radio look for it now rather than when it next gets round to it.
+	[ "$1" != join ] || touch /run/campmixer-look-now
+	systemctl restart --no-block campmixer-radio.service
 }
 
 cmd_wifi() {
@@ -164,7 +170,7 @@ cmd_wifi() {
 		need_root
 		[ $# -eq 1 ] || die "Use: campmixer wifi forget NAME"
 		python3 "$NETCONF" forget "$1" || exit $?
-		reload_wifi join
+		reload_wifi forget
 		;;
 	*)
 		usage
