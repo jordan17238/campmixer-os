@@ -2,6 +2,7 @@
 """CampMixer network settings.
 
 Turns /boot/firmware/campmixer.txt into NetworkManager profiles and looks after the Wi-Fi radio.
+It also hands the web app's PIN to the bridge, as a hash (how and why is in campmixer_auth.py).
 
   netconf.py apply                  write the profiles (runs at every start-up, before NetworkManager)
   netconf.py radio                  join a listed Wi-Fi network if one is in range, otherwise run the
@@ -10,10 +11,14 @@ Turns /boot/firmware/campmixer.txt into NetworkManager profiles and looks after 
   netconf.py set KEY=VALUE ...      change lines in campmixer.txt
   netconf.py join NAME [PASSWORD]   add a Wi-Fi network to join
   netconf.py forget NAME            remove one
+  netconf.py pin                    print the web app's PIN
+  netconf.py pin NEW | --new        change it, to NEW or to a made-up one; every phone has to sign in again
 
 Python standard library only.
 """
 import contextlib
+import grp
+import json
 import os
 import re
 import secrets
@@ -23,6 +28,9 @@ import time
 import uuid
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import campmixer_auth as auth  # noqa: E402
+
 ROOT = Path(os.environ.get("CAMPMIXER_ROOT", "/"))
 TESTING = "CAMPMIXER_ROOT" in os.environ
 BOOT = ROOT / "boot/firmware"
@@ -30,6 +38,9 @@ SETTINGS_FILE = BOOT / "campmixer.txt"
 NM_PROFILES = ROOT / "etc/NetworkManager/system-connections"
 NM_CONF = ROOT / "etc/NetworkManager/conf.d/90-campmixer.conf"
 NM_STATE = ROOT / "var/lib/NetworkManager/NetworkManager.state"
+WEB_KEY_FILE = ROOT / "var/lib/campmixer/web-key"  # root only; made on this Pi, never part of an image
+WEB_AUTH_FILE = ROOT / "run/campmixer/web-auth.json"  # root writes it, the bridge's group may read it
+BRIDGE_GROUP = os.environ.get("CAMPMIXER_BRIDGE_GROUP", "campmixer")
 SYS_NET = Path(os.environ.get("CAMPMIXER_SYS_NET", "/sys/class/net"))
 SYS_USB = Path(os.environ.get("CAMPMIXER_SYS_USB", str(ROOT / "sys/bus/usb/devices")))
 NMCLI = os.environ.get("CAMPMIXER_NMCLI", "nmcli")
@@ -53,7 +64,7 @@ POLL_S = 5
 LOOK_AFTER_IDLE_S = (60, 300, 600, 1200, 2400, 3600)
 RETRY_REFUSED_S = 1800  # a listed network that would not let the mixer in is left alone this long
 LOOK_NOW_FLAG = ROOT / "run/campmixer-look-now"
-KNOWN_KEYS = ["WIFI_NAME", "WIFI_PASSWORD", "WIFI_BAND", "WIFI_CHANNEL", "WIFI_RADIO", "LOGIN_PASSWORD"] + [
+KNOWN_KEYS = ["WIFI_NAME", "WIFI_PASSWORD", "WIFI_BAND", "WIFI_CHANNEL", "WIFI_RADIO", "LOGIN_PASSWORD", "WEB_PIN"] + [
     key for slot in range(1, JOIN_SLOTS + 1) for key in ("JOIN_WIFI_%d" % slot, "JOIN_WIFI_%d_PASSWORD" % slot)
 ]
 # Fixed namespace, so each profile keeps the same identity from one start-up to the next.
@@ -134,6 +145,7 @@ class Settings:
         self.band = "2.4"
         self.channel = DEFAULT_CHANNEL["2.4"]
         self.radio = "auto"
+        self.pin = None  # no usable PIN: nobody can sign in to the web app
         self.joins = []  # (slot, name, password)
         self.issues = []  # (setting, what is wrong and what happens instead)
 
@@ -194,6 +206,13 @@ def load_settings(raw=None):
         settings.radio = radio
     else:
         settings.issues.append(("WIFI_RADIO", "WIFI_RADIO must be auto, usb or onboard; using auto"))
+
+    pin = auth.tidy_pin(raw.get("WEB_PIN", ""))
+    pin_problem = auth.pin_problem(pin)
+    if pin_problem is None:
+        settings.pin = pin
+    else:
+        settings.issues.append(("WEB_PIN", "WEB_PIN %s; nobody can sign in to the web app until it is changed" % pin_problem))
 
     for slot in range(1, JOIN_SLOTS + 1):
         join_name = raw.get("JOIN_WIFI_%d" % slot, "")
@@ -287,23 +306,125 @@ def update_file(changes):
         write_if_changed(SETTINGS_FILE, "\n".join(out) + "\n")
 
 
-def ensure_wifi_password():
-    """Never run the mixer's own Wi-Fi on a password that is written down somewhere public.
+def ensure_made_up():
+    """Never run on a password or a PIN that is written down somewhere public, or that anyone would guess.
 
-    A blank or unusable WIFI_PASSWORD is replaced by a made-up one, saved in campmixer.txt for its owner to read.
+    A blank or unusable WIFI_PASSWORD or WEB_PIN is replaced by a made-up one, saved in campmixer.txt for the
+    mixer's owner to read. Nothing of the kind is built into the image.
     """
     try:
-        current = read_raw().get("WIFI_PASSWORD", "")
+        raw = read_raw()
     except OSError:
-        current = ""
-    if valid_passphrase(current):
+        raw = {}
+    changes, notes = {}, []
+    password = raw.get("WIFI_PASSWORD", "")
+    if not valid_passphrase(password):
+        changes["WIFI_PASSWORD"] = make_password()
+        notes.append("WIFI_PASSWORD was %s" % ("not usable" if password else "blank"))
+    pin = auth.tidy_pin(raw.get("WEB_PIN", ""))
+    if auth.pin_problem(pin):
+        changes["WEB_PIN"] = auth.make_pin()
+        notes.append("WEB_PIN was %s" % ("not usable or too easy to guess" if pin else "blank"))
+    if not changes:
         return
     try:
-        update_file({"WIFI_PASSWORD": make_password()})
+        update_file(changes)
     except (OSError, subprocess.SubprocessError) as exc:
-        log("could not save a new Wi-Fi password in %s (%s)" % (SETTINGS_FILE, exc))
+        log("could not save a new %s in %s (%s)" % (" and ".join(changes), SETTINGS_FILE, exc))
         return
-    log("WIFI_PASSWORD was %s, so a new one was made up. It is in campmixer.txt" % ("not usable" if current else "blank"))
+    if len(notes) == 1:
+        log("%s, so a new one was made up. It is in campmixer.txt" % notes[0])
+    else:
+        log("%s, so new ones were made up. They are in campmixer.txt" % " and ".join(notes))
+
+
+# ---------------------------------------------------------------- the web app's PIN
+
+
+def root_is_overlay():
+    """True when the card is locked: whatever is written to the system now is gone at the next start."""
+    locked = False
+    if not TESTING:
+        with contextlib.suppress(OSError):
+            for line in Path("/proc/self/mounts").read_text(errors="replace").splitlines():
+                fields = line.split()
+                if len(fields) >= 3 and fields[1] == "/":
+                    locked = fields[2] == "overlay"
+    return locked
+
+
+def web_key(create=True):
+    """This Pi's own secret for the web app: 32 random bytes, readable by root only.
+
+    Sign-in cookies are signed with a key made from it and the PIN. It is made up here the first time it is
+    needed, which on a fresh image is the first start, while the card can still be written. It is never part
+    of an image: a secret that everyone can download is no secret.
+    """
+    with contextlib.suppress(OSError, ValueError):
+        key = bytes.fromhex(WEB_KEY_FILE.read_text(encoding="ascii").strip())
+        if len(key) == 32:
+            return key
+    if not create:
+        return None
+    key = secrets.token_bytes(32)
+    try:
+        write_if_changed(WEB_KEY_FILE, key.hex() + "\n", 0o600)
+    except OSError as exc:
+        # Still worth running: the PIN works, phones just have to sign in again more often than they should.
+        log("could not keep this Pi's key for the web app (%s); phones will have to sign in again before long" % exc)
+        return key
+    if root_is_overlay():
+        log("the card is locked and had no key for the web app yet, so phones will have to sign in again after every "
+            "restart. To fix that once: sudo campmixer unlock, restart, sudo campmixer lock, restart")
+    return key
+
+
+def write_web_auth(pin):
+    """Give the bridge what it needs to check the PIN and recognise its own cookies, and nothing more.
+
+    Without a usable PIN the file is taken away, and the bridge then lets nobody sign in.
+    """
+    if pin is None:
+        with contextlib.suppress(FileNotFoundError):
+            WEB_AUTH_FILE.unlink()
+        return
+    data = json.dumps(auth.derive(web_key(), pin), indent=1).encode("ascii") + b"\n"
+    try:
+        gid = grp.getgrnam(BRIDGE_GROUP).gr_gid
+    except KeyError:
+        gid = None
+        log("there is no group called %s, so the bridge cannot be given the PIN's hash and nobody can sign in" % BRIDGE_GROUP)
+    folder = WEB_AUTH_FILE.parent
+    folder.mkdir(parents=True, exist_ok=True)
+    shared = gid is not None and os.geteuid() == 0
+    if shared:
+        os.chown(folder, 0, gid)
+    os.chmod(folder, 0o750)
+    temp = WEB_AUTH_FILE.with_name(WEB_AUTH_FILE.name + ".tmp")
+    try:
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            os.fchmod(fd, 0o600)
+            if shared:
+                os.fchown(fd, 0, gid)
+                os.fchmod(fd, 0o640)
+            handle.write(data)
+        os.replace(temp, WEB_AUTH_FILE)
+    except OSError:
+        with contextlib.suppress(OSError):
+            temp.unlink()
+        raise
+
+
+def apply_pin(settings):
+    try:
+        write_web_auth(settings.pin)
+    except (OSError, ValueError) as exc:
+        log("could not set up the web app's PIN (%s); nobody can sign in until that is fixed" % exc)
+        with contextlib.suppress(OSError):
+            WEB_AUTH_FILE.unlink()
+        return False
+    return settings.pin is not None
 
 
 # ---------------------------------------------------------------- NetworkManager profiles
@@ -452,10 +573,11 @@ def nm_conf(unmanaged):
 
 
 def apply(starting_up=False):
-    ensure_wifi_password()
+    ensure_made_up()
     settings = load_settings()
     for problem in settings.problems:
         log("settings: " + problem)
+    apply_pin(settings)
     if starting_up and not TESTING:
         # Let a USB Wi-Fi adaptor finish appearing before deciding which radio to use.
         with contextlib.suppress(OSError, subprocess.SubprocessError):
@@ -730,6 +852,7 @@ def show(with_passwords):
     print("Own Wi-Fi password: " + (secret(settings.password) if settings.password else "(not set, so the own Wi-Fi is off)"))
     print("Band and channel:   %s GHz, channel %d" % (settings.band, settings.channel))
     print("Radio:              " + settings.radio)
+    print("Web app PIN:        " + (secret(settings.pin) if settings.pin else "(not set, so nobody can sign in)"))
     if settings.joins:
         for slot, name, password in settings.joins:
             print("Joins when in range: %s (slot %d, password %s)" % (name, slot, secret(password)))
@@ -800,6 +923,25 @@ def forget(name):
     return finish_change()
 
 
+def pin_command(rest):
+    if not rest:
+        pin = load_settings().pin
+        print(pin if pin else "No usable PIN is set, so nobody can sign in. Make one up with: sudo campmixer pin --new")
+        return 0 if pin else 1
+    new = auth.make_pin() if rest == ["--new"] else auth.tidy_pin(rest[0])
+    problem = auth.pin_problem(new)
+    if problem:
+        print("Not changed: the PIN %s." % problem, file=sys.stderr)
+        return 2
+    update_file({"WEB_PIN": new})
+    settings = load_settings()
+    if settings.pin != new or not apply_pin(settings):
+        print("PROBLEM: the new PIN is saved in campmixer.txt but could not be put to use. See: campmixer logs", file=sys.stderr)
+        return 1
+    print("The PIN is now %s. Every phone has to sign in again with it." % new)
+    return 0
+
+
 def finish_change():
     code = apply()
     for problem in load_settings().problems:
@@ -822,6 +964,11 @@ def main(argv):
         return join(rest[0], rest[1] if len(rest) == 2 else "")
     if command == "forget" and len(rest) == 1:
         return forget(rest[0])
+    if command == "pin" and len(rest) <= 1:
+        return pin_command(rest)
+    if command == "web-key" and not rest:  # make this Pi's key for the web app now, while the card can be written
+        web_key()
+        return 0
     print(__doc__.strip(), file=sys.stderr)
     return 2
 

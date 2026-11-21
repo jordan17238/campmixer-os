@@ -13,7 +13,10 @@ VERSION="$(cat "$APP/VERSION" 2>/dev/null || echo unknown)"
 usage() {
 	cat <<'EOF'
 campmixer status                        what the Pi is doing right now
-campmixer wifi                          Wi-Fi settings in use (sudo shows the passwords)
+campmixer pin                           the PIN the web app asks for
+campmixer pin NEW                       change it (6 to 12 digits); every phone has to sign in again
+campmixer pin --new                     change it to a made-up one
+campmixer wifi                          Wi-Fi settings in use, with the passwords
 campmixer wifi own --name NAME --password PASSWORD [--band 2.4|5] [--channel N]
                                         change the mixer's own Wi-Fi network
 campmixer wifi join NAME [PASSWORD]     join this Wi-Fi network whenever it is in range
@@ -23,6 +26,8 @@ campmixer lock                          make the card read-only, so the power ca
 campmixer unlock                        make the card writable again, for changes and updates
 campmixer logs                          recent messages from the CampMixer services
 campmixer version
+
+Everything except status, logs and version needs sudo.
 EOF
 }
 
@@ -49,6 +54,11 @@ locked_next() {
 	grep -q "overlayroot=tmpfs" "$BOOT/cmdline.txt" 2>/dev/null
 }
 
+# The boot partition holds the passwords and the PIN, so only root can read it (campmixer-bootro sees to that).
+can_read_boot() {
+	[ -r "$BOOT/cmdline.txt" ]
+}
+
 cmd_status() {
 	local model storage dev type state conn stations driver found=0
 	model="$(tr -d '\0' </proc/device-tree/model 2>/dev/null || echo "unknown computer")"
@@ -56,12 +66,12 @@ cmd_status() {
 
 	if locked_now; then
 		storage="locked, safe to pull the power"
-		locked_next || storage="$storage (unlocks at the next restart)"
+		! can_read_boot || locked_next || storage="$storage (unlocks at the next restart)"
 	elif lock_asked_now; then
 		storage="NOT locked. The read-only layer did not start, so the card is being written to. See: campmixer logs"
 	else
 		storage="unlocked, changes are kept"
-		locked_next && storage="$storage (locks at the next restart)"
+		can_read_boot && locked_next && storage="$storage (locks at the next restart)"
 	fi
 	echo "Storage:   $storage"
 
@@ -99,19 +109,30 @@ cmd_status() {
 	echo "Addresses: $(ip -4 -o addr show 2>/dev/null | awk '$2 != "lo" {split($4, a, "/"); printf "%s (%s)  ", a[1], $2}')"
 
 	if systemctl is-active --quiet campmixer-bridge.service; then
-		echo "Bridge:    running, $(curl -s --max-time 2 http://127.0.0.1/api/status 2>/dev/null | python3 -c '
+		# The bridge tells this Pi itself how it is doing without a sign-in; everyone else has to sign in first.
+		curl -s --max-time 2 http://127.0.0.1/api/status 2>/dev/null | python3 -c '
 import json, sys
 try:
-    link = json.load(sys.stdin)["link"]
-    if not link["open"]:
-        print("serial port not available (%s)" % link["error"])
-    elif link["up"]:
-        print("mixer core connected")
-    else:
-        print("no signal from the mixer core")
+    status = json.load(sys.stdin)
+    link = status["link"]
 except Exception:
-    print("no status report")
-')"
+    print("Bridge:    running, but it gave no status report")
+    sys.exit()
+if not link["open"]:
+    print("Bridge:    running, serial port not available (%s)" % link["error"])
+elif link["up"]:
+    print("Bridge:    running, mixer core connected")
+else:
+    print("Bridge:    running, no signal from the mixer core")
+sign_in = status.get("sign_in", {})
+wrong = sign_in.get("wrong_pins", 0)
+if not sign_in.get("ready"):
+    print("Web app:   NOBODY can sign in: no usable PIN is set. Make one up with: sudo campmixer pin --new")
+elif wrong:
+    print("Web app:   asks for the PIN. Wrong PINs tried since start-up: %d" % wrong)
+else:
+    print("Web app:   asks for the PIN. No wrong PINs tried since start-up")
+'
 	else
 		echo "Bridge:    not running. See: campmixer logs"
 	fi
@@ -137,7 +158,8 @@ cmd_wifi() {
 	[ $# -gt 0 ] && shift
 	case "$action" in
 	"")
-		if [ "$(id -u)" -eq 0 ]; then python3 "$NETCONF" show --passwords; else python3 "$NETCONF" show; fi
+		need_root
+		python3 "$NETCONF" show --passwords
 		;;
 	own)
 		need_root
@@ -179,12 +201,21 @@ cmd_wifi() {
 	esac
 }
 
+cmd_pin() {
+	need_root
+	[ $# -le 1 ] || die "Use: campmixer pin, campmixer pin NEW or campmixer pin --new"
+	python3 "$NETCONF" pin "$@"
+}
+
 cmd_lock() {
 	need_root
 	if locked_now && locked_next; then
 		echo "Already locked."
 		return 0
 	fi
+	# The last moment the card can be written: make sure this Pi's own key for the web app is on it,
+	# or every phone would have to sign in again after each restart.
+	locked_now || python3 "$NETCONF" web-key || true
 	if ! dpkg-query -W -f='${Status}' overlayroot 2>/dev/null | grep -q "install ok installed"; then
 		apt-get install -y overlayroot || die "Could not install overlayroot. Connect the Pi to the internet and try again."
 	fi
@@ -255,6 +286,10 @@ password)
 wifi)
 	shift
 	cmd_wifi "$@"
+	;;
+pin)
+	shift
+	cmd_pin "$@"
 	;;
 lock)
 	cmd_lock

@@ -1,4 +1,4 @@
-# CampMixer OS 0.2.2
+# CampMixer OS 0.3.0
 
 Its own operating system for the Camp PA Mixer's Raspberry Pi, built on Raspberry Pi OS Lite (64-bit).
 You write one image to a microSD card and the Pi starts up as the mixer's remote. There is no install step.
@@ -7,7 +7,7 @@ This folder is the source for that image.
 
 ## What the OS does
 
-- **Web app at http://mixer.local.** For now a status page with a serial loopback test. The real mixer app drops into the same place later. The page has no log-in: see *Who can reach it* below.
+- **Web app at http://mixer.local, behind a PIN.** A fader, a mute button and a level meter for each input and for the master. See *The web app* and *Who can reach it* below.
 - **Wi-Fi.** It joins a network you have listed when that network is in range, so the mixer sits on the venue's LAN. Otherwise it makes its own network, `CampMixer`.
 - **Ethernet.** Plug it into any network and it takes an address. A cable straight to a laptop works too, within a few seconds, on a 169.254 address. It keeps asking for a proper address in the background, so a router that starts up after the mixer is still picked up without touching the cable.
 - **SSH** is on: `ssh mixer@mixer.local`.
@@ -34,11 +34,11 @@ No password is built into the image or into this source, so both are safe to kee
 ## First start
 
 1. In **Raspberry Pi Imager** choose *Use custom*, pick the `.img.xz` file and write it to the card. Skip the customisation step.
-2. Before the first start: take the card out and put it back in, open `campmixer.txt` on the `bootfs` drive and type in `WIFI_PASSWORD` and `LOGIN_PASSWORD` (8 characters or more each), and any networks to join. Doing this now saves pulling the card later to read made-up ones.
+2. Before the first start: take the card out and put it back in, open `campmixer.txt` on the `bootfs` drive and type in `WIFI_PASSWORD` and `LOGIN_PASSWORD` (8 characters or more each), `WEB_PIN` (6 to 12 digits), and any networks to join. Doing this now saves pulling the card later to read made-up ones.
 3. Put the card in the Pi and power it. The first start takes about two minutes and restarts itself once (twice if the Pi's own bootloader gets an update): it grows the file system to fill the card, makes its SSH keys, sets the passwords and locks the card.
-4. Open **http://mixer.local**, or log in with `ssh mixer@mixer.local`.
+4. Open **http://mixer.local** and type the PIN, or log in with `ssh mixer@mixer.local`.
 
-Any password you left blank is made up on that first start and written into `campmixer.txt`. Put the card back in your computer to read it. A login password you chose yourself is removed from the file once it has been set.
+Any password or PIN you left blank is made up on that first start and written into `campmixer.txt`. Put the card back in your computer to read it. A login password you chose yourself is removed from the file once it has been set.
 
 `sudo` asks for that same login password.
 
@@ -52,6 +52,7 @@ Any password you left blank is made up on that first start and written into `cam
     WIFI_CHANNEL=6
     JOIN_WIFI_1=Church Hall      up to four networks to join when in range
     JOIN_WIFI_1_PASSWORD=...
+    WEB_PIN=...                  6 to 12 digits; each phone is asked for it once
     WIFI_RADIO=auto              auto, usb or onboard
     LOGIN_PASSWORD=              read once, on the first start
 
@@ -73,21 +74,51 @@ A phone on the mixer's own network will say it has no internet, because it has n
 
 Save the file as plain text in UTF-8, which is what Notepad and TextEdit do by default now. A file in another encoding is still read, but a name with an accent or a curly apostrophe in it (`Jordan’s iPhone`) will not match the real network, and `campmixer wifi` says so.
 
-There is no built-in Wi-Fi password. If `WIFI_PASSWORD` is blank or cannot be used (it needs 8 to 63 characters), the mixer makes one up at start-up and writes it into the file. The commands refuse a value the mixer could not use, and change nothing.
+There is no built-in Wi-Fi password and no built-in PIN. If `WIFI_PASSWORD` is blank or cannot be used (it needs 8 to 63 characters), the mixer makes one up at start-up and writes it into the file. The same goes for `WEB_PIN` when it is blank, is not 6 to 12 digits, or is one anybody would guess (123456, 111111, 121212 and the like): an 8-digit one is made up. The commands refuse a value the mixer could not use, and change nothing.
+
+## The web app
+
+Open http://mixer.local on a phone or a laptop on the same network and type the PIN. Each phone is asked once and stays signed in, through restarts, until the PIN is changed.
+
+Each input, and the master, has:
+
+- **A fader.** Drag it sideways. It moves by as far as your finger moves, from where it was: touching the track does not make it jump, and scrolling the page past it moves nothing. The mark three quarters of the way along is 0 dB. All the way left is off.
+- **− and +** for half a decibel at a time.
+- **Mute.** The button turns red and reads *Muted*.
+- **A meter.** An input's meter shows what is coming in on it, fader down and muted or not, so a microphone can be seen to be alive before it is brought up. The master's shows what is going out.
+
+The settings live in the mixer core, not in the phone or the Pi. A change made on one phone shows on every other phone as the core confirms it, and so will a turn of a knob on the front panel.
+
+When the mixer core cannot be reached the controls go grey and the page says why. From there **Try the controls without a mixer** runs a practice mixer inside the page. It is marked as practice, is connected to nothing, and ends by itself the moment a real mixer core appears.
+
+Not in yet: gain, 48 V, ground lift, high-pass, feedback filter, names and scenes (the front panel's menus).
 
 ## Who can reach it
 
-The web page and the mixer controls behind it have no log-in of their own.
+**The web app asks for a PIN**, on every network. Without it a browser gets the sign-in page and nothing else: no controls, no status, nothing about the mixer.
 
-- On the mixer's own Wi-Fi, the Wi-Fi password is the lock.
-- On a venue's Wi-Fi or on Ethernet, **anyone on that network can open the page**. That is harmless while the page only shows status. It needs a PIN before real mixer controls go on it.
-- A web site out on the internet cannot reach in through someone's browser: the mixer answers only to its own name (`mixer.local`, `mixer`, `mixer.lan` and the like) or its address.
-- SSH needs the login password, on every network.
+- The PIN is `WEB_PIN` in `campmixer.txt`: 6 to 12 digits. `sudo campmixer pin` shows it, `sudo campmixer pin NEW` changes it and `sudo campmixer pin --new` makes one up. Changing it signs every phone out.
+- **Guessing is slow.** One address gets five wrong tries, then waits before each further one: 30 s, a minute, two, then five minutes every time. Everybody together gets 20 wrong tries, of which one comes back every three minutes, so changing address does not help. That caps guessing at about 500 PINs a day: centuries against the 100 million eight-digit PINs, a few years against the million six-digit ones. On a network the mixer lives on for good, use eight digits or more.
+- The count of wrong PINs is on the page (under *The Pi and its link*) and in `campmixer status`. It outlives a restart of the bridge.
+- The price of that limit: someone who keeps feeding the page wrong PINs can keep *new* phones from signing in. Phones already signed in are not affected.
+- A web site out on the internet cannot reach in through someone's browser: the mixer answers only to its own name (`mixer.local`, `mixer`, `mixer.lan` and the like) or its address, takes a PIN only from its own page, and lets only its own page use the controls.
+
+**What the PIN does not do.** The page is plain `http`, so the PIN and the sign-in cookie cross the network unencrypted. The PIN keeps out everyone who can merely *reach* the page. It does not keep out someone who records the network's traffic at the moment a phone signs in or is in use. On the mixer's own Wi-Fi that takes the Wi-Fi password, so give that only to people you would hand the mixer to. On a venue's network it takes access to their network gear or a deliberate attack on the network. Closing that gap needs `https`, which on a local name means a certificate warning on every phone, so it is left out for now.
+
+**The rest of the Pi.**
+
+- SSH needs the login password, on every network. Root cannot log in. An obvious login password in `campmixer.txt` (`password1`, `Mixer2026!`) is not used; one is made up instead.
+- `campmixer.txt` holds the Wi-Fi password, the PIN and perhaps the login password, so the partition it is on can be read by root only. On the Pi, reading it takes `sudo`. With the card in a computer, anyone holding the card can read it: whoever has the card has the mixer.
+- The part that talks to the network (the bridge) runs as its own user with no rights to anything but the serial port and the network. It never sees the PIN, only a slow hash of it, and cannot read `campmixer.txt`.
+- No password, PIN or key is built into the image or this source. Each card makes up its own on its first start.
 
 ## Commands
 
     campmixer status                          what it is doing now, and which radio it is using
-    sudo campmixer wifi                       settings in use, with passwords
+    sudo campmixer pin                        the PIN the web app asks for
+    sudo campmixer pin 48271935               change it (every phone signs in again)
+    sudo campmixer pin --new                  change it to a made-up one
+    sudo campmixer wifi                       settings in use, with passwords and the PIN
     sudo campmixer wifi join "Church Hall" "its password"
     sudo campmixer wifi forget "Church Hall"
     sudo campmixer wifi own --name "Hall Mixer" --password "something long"
@@ -96,7 +127,7 @@ The web page and the mixer controls behind it have no log-in of their own.
     sudo campmixer password                   change your login password (unlock first)
     campmixer logs
 
-The Wi-Fi commands take effect straight away and also work while the card is locked.
+The Wi-Fi and PIN commands take effect straight away and also work while the card is locked.
 
 ## Keeping the card alive
 
@@ -108,7 +139,7 @@ A microSD card wears out from writes, so the aim is no writes at all.
 - Swap is compressed memory only. Raspberry Pi OS's default also keeps a swap file on the card; that is switched off.
 - Scheduled jobs that write (package checks, log rotation, manual-page index, package database backup, file system scrub) are off.
 - At start-up the network profiles are rewritten only if `campmixer.txt` changed.
-- The only writes left are the ones you ask for: `campmixer wifi ...` rewrites `campmixer.txt`, and updates happen while unlocked.
+- The only writes left are the ones you ask for: `campmixer wifi ...` and `campmixer pin ...` rewrite `campmixer.txt`, and updates happen while unlocked.
 
 Reading does not wear a card. The Pi reads the system from the card once at start-up and after that runs from memory, so in use the card sits idle.
 
@@ -120,8 +151,9 @@ Reading does not wear a card. The Pi reads the system from the card once at star
 
 ## Try it before the mixer exists
 
-- Open http://mixer.local. The link shows "No signal from the mixer core", which is right: there is no Teensy yet.
-- **Loopback test:** join header pins 8 and 10 with a jumper wire and press *Send a test frame*. "Came back in N ms" proves the serial port, the bridge and the WebSocket.
+- Open http://mixer.local and sign in. The page says "No signal from the mixer core", which is right: there is no Teensy yet. **Try the controls without a mixer** lets you use the faders anyway, in practice mode.
+- **Loopback test** (under *The Pi and its link to the mixer core*): join header pins 8 and 10 with a jumper wire and press *Send a test frame*. "Came back in N ms" proves the serial port, the bridge and the WebSocket.
+- **A stand-in mixer core on a laptop:** with a 3.3 V USB serial adaptor wired to pins 8, 10 and 6, `python3 tests/standin_core.py /dev/ttyUSB0` answers the app the way the Teensy will, so the real page can be used over the real link.
 - Without the USB adaptor, the Pi's built-in radio makes the `CampMixer` network on the bench. Once the Alfa is plugged in at start-up, that takes over and the built-in radio goes quiet.
 
 ## Wiring to the Teensy
@@ -133,7 +165,7 @@ Reading does not wear a card. The Pi reads the system from the card once at star
 | 6 | Ground | Pi side of the optocouplers |
 | 1 | 3.3 V | Pi side of the optocouplers |
 
-The framing on that link is in `PROTOCOL.md`.
+The framing on that link, and the messages for volume, mute and meters that the Teensy's firmware has to speak, are in `PROTOCOL.md`.
 
 ## What is in this folder
 
@@ -145,7 +177,7 @@ The framing on that link is in `PROTOCOL.md`.
 | `image/` | The pi-gen stage and the build script |
 | `.github/workflows/`, `ci/` | The GitHub build |
 | `tests/` | The checks |
-| `PROTOCOL.md` | The serial framing and what a browser sees |
+| `PROTOCOL.md` | The serial framing, what a browser sees, and the messages for volume, mute and meters |
 
 `install.sh` also runs on a Pi that already has stock Raspberry Pi OS Lite, if you ever want the layer without writing an image: copy this folder to `bootfs`, then `sudo bash /boot/firmware/campmixer-os/install.sh`.
 

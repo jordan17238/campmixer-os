@@ -28,6 +28,13 @@ JOIN_WIFI_3_PASSWORD=
 JOIN_WIFI_4=
 JOIN_WIFI_4_PASSWORD=
 
+# ---- PIN for the web app ----
+# Each phone is asked for it once, the first time it opens the mixer's page. 6 to 12 digits.
+# Leave it blank and the mixer makes up an 8-digit one at start-up and writes it here to read.
+# One that anyone would guess (123456, 111111, 121212 and the like) is replaced in the same way.
+# Changing it signs every phone out. Do not use a birthday or a phone's own PIN.
+WEB_PIN=
+
 # ---- Which radio ----
 # auto     the USB Wi-Fi adaptor if it is plugged in at start-up, otherwise the Pi's built-in radio
 #          ("campmixer status" says which one is in use)
@@ -38,6 +45,7 @@ WIFI_RADIO=auto
 # ---- Login over SSH (CampMixer OS image only) ----
 # The account is "mixer":  ssh mixer@mixer.local
 # Put a password of 8 or more characters here before the first start. It is set, then removed from this file.
-# Leave it blank (or shorter than 8) and the mixer makes one up on its first start and writes it here to read.
+# Leave it blank (or shorter than 8, or an obvious one such as password1) and the mixer makes one up on its
+# first start and writes it here to read.
 # The same password is asked for by "sudo".
 LOGIN_PASSWORD=

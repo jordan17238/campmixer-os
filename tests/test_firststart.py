@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Checks the image's first-start set-up: passwords from campmixer.txt, or made up and written back."""
+import grp
 import os
 import re
 import subprocess
@@ -9,6 +10,7 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIRSTSTART = os.path.join(HERE, "..", "rootfs", "opt", "campmixer", "firststart.py")
 MADE_UP = r"[a-z2-9]{4}-[a-z2-9]{4}-[a-z2-9]{4}"
+os.environ["CAMPMIXER_BRIDGE_GROUP"] = grp.getgrgid(os.getgid()).gr_name  # stands in for the bridge's group
 
 
 def first_start(settings, chpasswd_fails=False):
@@ -55,7 +57,7 @@ assert read("/boot/firmware/campmixer.txt") == text
 run, read, root = first_start("WIFI_PASSWORD=my wifi password\nLOGIN_PASSWORD=pa:ss word 123\nJOIN_WIFI_1=Hall\n")
 assert run().returncode == 0
 text = read("/boot/firmware/campmixer.txt")
-assert "WIFI_PASSWORD=my wifi password\n" in text and "LOGIN_PASSWORD=\n" in text and "123" not in text
+assert "WIFI_PASSWORD=my wifi password\n" in text and "LOGIN_PASSWORD=\n" in text and "word 123" not in text
 assert read("/chpasswd.log") == "mixer:pa:ss word 123\n"
 assert os.path.exists(root + "/etc/NetworkManager/system-connections/campmixer-join-1.nmconnection")
 

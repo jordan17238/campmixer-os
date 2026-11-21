@@ -5,7 +5,8 @@ The image has no passwords in it. On its first start this sets the login passwor
 campmixer.txt, or makes one up and writes it into that file, where it can be read with the card in a computer.
 A login password you chose yourself is removed from the file once it is set.
 
-(The Wi-Fi password is looked after by netconf.py at every start-up: a blank or unusable one is made up there.)
+(The Wi-Fi password and the web app's PIN are looked after by netconf.py at every start-up: a blank or
+unusable one is made up there.)
 """
 import os
 import pwd
@@ -14,6 +15,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import campmixer_auth as auth  # noqa: E402
 import netconf  # noqa: E402
 
 CHPASSWD = os.environ.get("CAMPMIXER_CHPASSWD", "chpasswd")
@@ -29,8 +31,22 @@ def login_user():
     return users[0][1] if users else None
 
 
+# The login opens the whole Pi, over the network. These are what anyone guessing tries first.
+OBVIOUS = frozenset(
+    "password passwort raspberry raspberrypi campmixer mixer pi admin root user login welcome letmein changeme "
+    "qwerty qwertyui qwertyuiop asdfghjk iloveyou secret default".split()
+)
+
+
 def usable_login_password(password):
-    return 8 <= len(password) <= 127 and all(32 <= ord(ch) <= 126 for ch in password)
+    if not 8 <= len(password) <= 127 or not all(32 <= ord(ch) <= 126 for ch in password):
+        return False
+    core = password.lower().strip("0123456789 !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")
+    if core in OBVIOUS:
+        return False  # an obvious word with digits or punctuation tacked on: password1, Mixer2026!
+    if not core and auth.weak_pin("".join(ch for ch in password if ch.isdigit())):
+        return False  # 12345678, 0000-0000
+    return len(set(password)) > 2
 
 
 def main():

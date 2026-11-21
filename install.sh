@@ -111,7 +111,11 @@ put 755 opt/campmixer/bridge.py
 put 755 opt/campmixer/netconf.py
 put 755 opt/campmixer/firststart.py
 put 644 opt/campmixer/campmixer_link.py
+put 644 opt/campmixer/campmixer_auth.py
 put 644 opt/campmixer/www/index.html
+put 644 opt/campmixer/www/app.js
+put 644 opt/campmixer/www/mixer-link.js
+put 644 opt/campmixer/www/app.css
 put 644 opt/campmixer/www/manifest.webmanifest
 put 644 opt/campmixer/www/icon.svg
 put 755 usr/local/bin/campmixer
@@ -126,6 +130,7 @@ put 644 etc/systemd/system/campmixer-firststart.service
 put 644 etc/systemd/system.conf.d/10-campmixer-watchdog.conf
 put 644 etc/systemd/journald.conf.d/10-campmixer.conf
 put 644 etc/NetworkManager/dnsmasq-shared.d/campmixer.conf
+put 644 etc/ssh/sshd_config.d/10-campmixer.conf
 put 644 etc/rpi/swap.conf.d/90-campmixer.conf
 put 644 etc/motd
 install -D -m 644 "$SRC/VERSION" "$ROOT/opt/campmixer/VERSION"
@@ -194,8 +199,8 @@ if [ ! -f "$SETTINGS" ]; then
 	say "Creating $SETTINGS"
 	cp "$SRC/campmixer.txt" "$SETTINGS"
 fi
-# A blank Wi-Fi password stays blank here. "netconf apply" makes one up: further down on a running Pi,
-# and at the first start for an image, which must not carry a password.
+# A blank Wi-Fi password or PIN stays blank here. "netconf apply" makes them up: further down on a running Pi,
+# and at the first start for an image, which must not carry a password, a PIN or a key of any kind.
 
 # ------------------------------------------------------------------ services
 
@@ -241,7 +246,7 @@ fi
 
 say "CampMixer OS $VERSION is installed"
 if [ "$IMAGE" = 1 ]; then
-	echo "Passwords are set on the image's first start, from campmixer.txt on its boot partition."
+	echo "Passwords and the PIN are set on the image's first start, from campmixer.txt on its boot partition."
 	exit 0
 fi
 
@@ -249,7 +254,7 @@ netconf apply
 netconf show --passwords || true
 cat <<EOF
 
-Web app:  http://$HOST_NAME.local   (from the next start)
+Web app:  http://$HOST_NAME.local   (from the next start; it asks for the PIN shown above)
 SSH:      ssh ${SUDO_USER:-your-user}@$HOST_NAME.local
 Settings: $SETTINGS   (plain text, also editable with the card in a computer)
 EOF

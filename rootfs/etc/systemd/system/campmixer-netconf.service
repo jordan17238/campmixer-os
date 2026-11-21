@@ -9,8 +9,9 @@ ConditionPathExists=/opt/campmixer/netconf.py
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/bin/python3 /opt/campmixer/netconf.py apply
-# Normally well under a second. The limit only matters if the card is very slow or very busy.
-TimeoutStartSec=120
+# A second or two on a Pi 4. The limit only matters if the card is very slow or very busy, as on a first
+# start, when the system is also growing its file system and making its SSH keys.
+TimeoutStartSec=300
 
 [Install]
 WantedBy=multi-user.target

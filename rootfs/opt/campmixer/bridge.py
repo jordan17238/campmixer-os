@@ -4,10 +4,18 @@
 Serves the web app's files and relays frames between the mixer core's serial link and every
 browser connected to the /ws WebSocket. Python standard library only, so it needs no packages.
 
-  GET /             the web app (files under --www)
-  GET /api/status   link and network state as JSON
-  GET /ws           WebSocket. A binary message is one frame payload, in either direction.
-                    A text message from the bridge is a JSON status report, sent once a second.
+Open to anyone who can reach the Pi (none of it says anything about the mixer):
+  GET  /             the web app's own files (under --www)
+  GET  /api/session  whether this browser is signed in, and how long it must wait before trying a PIN
+  POST /api/login    {"pin": "..."}; answers with a sign-in cookie if the PIN is right
+  POST /api/logout   takes the cookie away again
+
+Only with a sign-in cookie:
+  GET  /api/status   link and network state as JSON (also allowed from the Pi itself, for "campmixer status")
+  GET  /ws           WebSocket. A binary message is one frame payload, in either direction.
+                     A text message from the bridge is a JSON status report, sent once a second.
+
+How the PIN is checked and what it does and does not protect is in campmixer_auth.py.
 """
 import argparse
 import asyncio
@@ -18,6 +26,7 @@ import html
 import ipaddress
 import json
 import logging
+import math
 import mimetypes
 import os
 import re
@@ -31,11 +40,18 @@ import urllib.parse
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import campmixer_auth as auth  # noqa: E402
 from campmixer_link import MAX_PAYLOAD, FrameDecoder, encode_frame  # noqa: E402
 
 LOG = logging.getLogger("campmixer.bridge")
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 MAX_WS_MESSAGE = 64 * 1024
+MAX_BODY = 1024  # the only thing ever posted here is a PIN
+MAX_SIGN_INS_QUEUED = 8
+MAX_CONNECTIONS = 256  # open at once, well under what the process may hold, so its own work never runs short
+MAX_CONNECTIONS_PER_ADDRESS = 32
+REQUEST_TIMEOUT_S = 30  # for a whole request and its answer; a WebSocket, once open, has its own rule
+COOKIE_LIFE_S = 400 * 24 * 3600  # as long as browsers allow; changing the PIN is what ends a sign-in
 MAX_SERIAL_BACKLOG = 64 * 1024
 LINK_TIMEOUT_S = 2.0
 CLIENT_SILENCE_S = 35
@@ -50,11 +66,25 @@ BAUD_RATES = {
 REASONS = {
     200: "OK",
     400: "Bad Request",
+    401: "Unauthorized",
     403: "Forbidden",
     404: "Not Found",
     405: "Method Not Allowed",
+    413: "Content Too Large",
     426: "Upgrade Required",
+    429: "Too Many Requests",
+    503: "Service Unavailable",
 }
+# Sent with every answer. The app's files load nothing from anywhere else, may not be framed by another
+# page (so nobody can lay their own page over the mixer's buttons), and run no script written into a page.
+SECURITY_HEADERS = (
+    "X-Content-Type-Options: nosniff",
+    "X-Frame-Options: DENY",
+    "Referrer-Policy: no-referrer",
+    "Cross-Origin-Resource-Policy: same-origin",
+    "Content-Security-Policy: default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; "
+    "frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+)
 
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 mimetypes.add_type("text/javascript", ".js")
@@ -69,6 +99,9 @@ def sd_notify(message):
     if address[0] == "@":
         address = "\0" + address[1:]
     with contextlib.suppress(OSError), socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+        # Never wait here: this runs in the same loop as everything else, and a message that systemd is too
+        # busy to take is better lost (it restarts a bridge it hears nothing from) than a bridge standing still.
+        sock.setblocking(False)
         sock.sendto(message.encode(), address)
 
 
@@ -221,10 +254,13 @@ class Client:
         self.writer = writer
         self.queue = asyncio.Queue(maxsize=256)
         self.open = True
+        self.close_sent = False
 
     def send(self, opcode, payload=b""):
-        if not self.open:
-            return
+        if not self.open or self.close_sent:
+            return  # after the goodbye, nothing more: a browser counts anything else as an error
+        if opcode == 0x8:
+            self.close_sent = True
         try:
             self.queue.put_nowait(ws_frame(opcode, payload))
         except asyncio.QueueFull:
@@ -270,6 +306,38 @@ def is_own_name(host):
     return "." not in name or name.endswith(LOCAL_ONLY_SUFFIXES)
 
 
+def cookie_value(headers, name):
+    for part in headers.get("cookie", "").split(";"):
+        key, sep, value = part.strip().partition("=")
+        if sep and key == name:
+            return value
+    return ""
+
+
+def same_origin(headers):
+    """False for a request that a page from some other site made the browser send (cross-site request forgery).
+
+    Browsers say where a POST comes from. Anything that is not a browser has no page to be tricked by.
+    """
+    if headers.get("sec-fetch-site", "same-origin") not in ("same-origin", "none"):
+        return False
+    origin = headers.get("origin")
+    return not origin or urllib.parse.urlsplit(origin).netloc.lower() == headers.get("host", "").lower()
+
+
+def peer_address(writer):
+    """(address, whether it is this Pi itself) for the other end of a connection."""
+    peer = writer.get_extra_info("peername")
+    host = str(peer[0]) if peer else ""
+    try:
+        address = ipaddress.ip_address(host.split("%")[0])
+    except ValueError:
+        return host or "unknown", False
+    if address.version == 6 and address.ipv4_mapped:
+        address = address.ipv4_mapped
+    return str(address), address.is_loopback
+
+
 def root_is_overlay(mounts="/proc/self/mounts"):
     """True when the card is locked: the system is running on a layer in memory over a read-only card."""
     locked = False
@@ -292,6 +360,17 @@ class Bridge:
         self.serial = SerialLink(loop, args.serial, args.baud, self.on_serial_frame)
         self.started = time.monotonic()
         self.network = {"addresses": [], "wifi": None}
+        self.auth_path = Path(args.auth)
+        self.auth = None
+        self.auth_stamp = ()
+        self.throttle = auth.Throttle()
+        self.throttle_path = Path(args.state) if args.state else None
+        self.throttle_saved = True
+        self.checking = asyncio.Lock()
+        self.sign_ins_queued = 0
+        self.connections = {}  # address -> connections open from it
+        self.load_auth()
+        self.load_throttle()
         version_file = Path(__file__).resolve().parent / "VERSION"
         self.version = version_file.read_text().strip() if version_file.is_file() else "dev"
         self.locked = root_is_overlay()
@@ -307,6 +386,118 @@ class Bridge:
             self.serial.open()
             await asyncio.sleep(2)
 
+    # ----- signing in -----
+
+    def load_auth(self):
+        """Read what netconf.py wrote for checking PINs. Called at start, then whenever that file changes.
+
+        Without a usable file nobody can sign in. The page is never left open for want of one.
+        """
+        try:
+            stat = self.auth_path.stat()
+            stamp = (stat.st_mtime_ns, stat.st_ino, stat.st_size)
+        except OSError:
+            stamp = None
+        if stamp == self.auth_stamp:
+            return
+        self.auth_stamp = stamp
+        before = self.auth.session_key if self.auth else None
+        try:
+            self.auth = auth.Verifier.load(self.auth_path) if stamp else None
+        except Exception as exc:  # whatever is wrong with it, the answer is the same: nobody gets in
+            LOG.error("cannot use %s (%s)", self.auth_path, exc)
+            self.auth = None
+        if self.auth is None:
+            LOG.warning("no PIN is set up (%s), so nobody can sign in", self.auth_path)
+        if before is not None and (self.auth is None or self.auth.session_key != before):
+            LOG.info("the PIN has changed: everyone is signed out")
+            for client in list(self.clients):
+                self.clients.discard(client)
+                client.send(0x8, struct.pack("!H", 4001) + b"signed out")
+                self.loop.call_later(1, client.writer.transport.abort)
+
+    def signed_in(self, headers):
+        return self.auth is not None and self.auth.token_ok(cookie_value(headers, auth.COOKIE))
+
+    def load_throttle(self):
+        """Carry on counting wrong PINs where the bridge that ran before this one stopped."""
+        if self.throttle_path is None:
+            return
+        try:
+            with open(self.throttle_path, encoding="ascii") as handle:
+                self.throttle.restore(json.load(handle))
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            LOG.error("cannot use %s (%s); counting wrong PINs from nothing", self.throttle_path, exc)
+
+    def save_throttle(self):
+        if self.throttle_path is None:
+            return
+        temp = self.throttle_path.with_name(self.throttle_path.name + ".tmp")
+        try:
+            temp.write_text(json.dumps(self.throttle.dump()), encoding="ascii")
+            os.replace(temp, self.throttle_path)
+            self.throttle_saved = True
+        except OSError as exc:
+            if self.throttle_saved:
+                LOG.error("cannot write %s (%s); the count of wrong PINs will not outlast this bridge", self.throttle_path, exc)
+            self.throttle_saved = False
+
+    async def sign_in(self, writer, headers, body, source):
+        if self.auth is None:
+            await self.respond_json(writer, 503, {"ok": False, "error": "No PIN is set up on the mixer. See: campmixer logs"})
+            return
+        pin = None
+        if headers.get("content-type", "").split(";")[0].strip().lower() == "application/json":
+            try:
+                pin = json.loads(body.decode("utf-8"))["pin"]
+            except (ValueError, KeyError, TypeError, RecursionError):
+                pin = None
+        if not isinstance(pin, str):
+            await self.respond_json(writer, 400, {"ok": False, "error": 'Send {"pin": "..."} as application/json'})
+            return
+        pin = auth.tidy_pin(pin)
+        if not auth.looks_like_pin(pin):
+            # Letters, or too few digits: a slip of the thumb, not a guess. It cannot be right and does not count.
+            await self.respond_json(writer, 403, {"ok": False, "wait": math.ceil(self.throttle.wait(source))})
+            return
+        wait = self.throttle.wait(source)
+        if wait > 0 or self.sign_ins_queued >= MAX_SIGN_INS_QUEUED:
+            await self.respond_wait(writer, max(wait, 1))
+            return
+        self.sign_ins_queued += 1
+        try:
+            # One check at a time: each costs the Pi a tenth of a second of hard work, on purpose.
+            async with self.checking:
+                wait = self.throttle.wait(source)  # the tries may have been used up while this one queued
+                if wait > 0:
+                    await self.respond_wait(writer, wait)
+                    return
+                checker = self.auth
+                # Counted as wrong first, and written down, so that nothing which interrupts the check
+                # (this bridge being stopped included) lets a wrong PIN go uncounted.
+                self.throttle.spend(source)
+                self.save_throttle()
+                right = checker is not None and await self.loop.run_in_executor(None, checker.check_pin, pin)
+                if right:
+                    self.throttle.refund(source)
+                    self.save_throttle()
+        finally:
+            self.sign_ins_queued -= 1
+        if right:
+            LOG.info("signed in from %s", source)
+            cookie = "Set-Cookie: %s=%s; Path=/; Max-Age=%d; HttpOnly; SameSite=Strict" % (
+                auth.COOKIE, checker.new_token(), COOKIE_LIFE_S)
+            await self.respond_json(writer, 200, {"ok": True}, extra=(cookie,))
+        else:
+            LOG.warning("wrong PIN from %s (%d wrong since start-up)", source, self.throttle.wrong_total)
+            await self.respond_json(writer, 403, {"ok": False, "wait": math.ceil(self.throttle.wait(source))})
+
+    async def respond_wait(self, writer, wait):
+        seconds = math.ceil(wait)
+        await self.respond_json(writer, 429, {"ok": False, "wait": seconds}, extra=("Retry-After: %d" % seconds,))
+
     # ----- status -----
 
     def status(self):
@@ -319,6 +510,7 @@ class Bridge:
             "link": self.serial.status(),
             "clients": len(self.clients),
             "network": self.network,
+            "sign_in": {"ready": self.auth is not None, "wrong_pins": self.throttle.wrong_total},
         }
 
     async def ticker(self):
@@ -326,6 +518,7 @@ class Bridge:
         while True:
             await asyncio.sleep(1)
             beat += 1
+            self.load_auth()
             report = json.dumps(self.status()).encode()
             for client in list(self.clients):
                 client.send(0x1, report)
@@ -376,7 +569,7 @@ class Bridge:
     async def watchdog(self):
         usec = int(os.environ.get("WATCHDOG_USEC", "0") or 0)
         if not usec:
-            return
+            await asyncio.Future()  # nobody is watching (run by hand, not by systemd): nothing to do, for good
         interval = max(1.0, usec / 2_000_000)
         while True:
             sd_notify("WATCHDOG=1")
@@ -384,18 +577,23 @@ class Bridge:
 
     # ----- HTTP -----
 
-    async def respond(self, writer, status, body=b"", ctype="text/plain; charset=utf-8", head_only=False, extra=()):
+    async def respond(self, writer, status, body=b"", ctype="text/plain; charset=utf-8", head_only=False, extra=(),
+                      cache="no-cache"):
         lines = [
             "HTTP/1.1 %d %s" % (status, REASONS[status]),
             "Content-Type: " + ctype,
             "Content-Length: %d" % len(body),
-            "Cache-Control: no-cache",
-            "X-Content-Type-Options: nosniff",
+            "Cache-Control: " + cache,
+            *SECURITY_HEADERS,
             "Connection: close",
             *extra,
         ]
         writer.write(("\r\n".join(lines) + "\r\n\r\n").encode("latin-1") + (b"" if head_only else body))
         await writer.drain()
+
+    async def respond_json(self, writer, status, data, head_only=False, extra=()):
+        body = json.dumps(data, indent=1).encode()
+        await self.respond(writer, status, body, "application/json", head_only, extra, cache="no-store")
 
     def find_file(self, path):
         path = urllib.parse.unquote(path)
@@ -409,18 +607,32 @@ class Bridge:
         return target
 
     async def handle(self, reader, writer):
+        source, _local = peer_address(writer)
+        mine = self.connections.get(source, 0)
+        if sum(self.connections.values()) >= MAX_CONNECTIONS or mine >= MAX_CONNECTIONS_PER_ADDRESS:
+            writer.transport.abort()  # more open than any honest use needs: no answer, nothing held
+            return
+        self.connections[source] = mine + 1
         try:
-            await self._handle(reader, writer)
+            upgrade = await asyncio.wait_for(self._handle(reader, writer, source), REQUEST_TIMEOUT_S)
+            if upgrade is not None:
+                await self.websocket(reader, writer, *upgrade)
         except (ConnectionError, asyncio.IncompleteReadError, asyncio.TimeoutError, OSError):
             pass
         except Exception:  # keep serving the others whatever one connection does
             LOG.exception("connection handler failed")
         finally:
+            if self.connections.get(source, 0) <= 1:
+                self.connections.pop(source, None)
+            else:
+                self.connections[source] -= 1
             with contextlib.suppress(Exception):
                 writer.close()
-                await writer.wait_closed()
+                await asyncio.wait_for(writer.wait_closed(), 5)
+            writer.transport.abort()
 
-    async def _handle(self, reader, writer):
+    async def _handle(self, reader, writer, source):
+        """Answer one request. Returns (method, headers) if it is a signed-in browser asking for the WebSocket."""
         try:
             head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 10)
         except asyncio.LimitOverrunError:
@@ -438,20 +650,53 @@ class Bridge:
             if sep:
                 headers[name.strip().lower()] = value.strip()
         path = target.split("?", 1)[0]
+        from_this_pi = peer_address(writer)[1]
 
         if not is_own_name(headers.get("host", "")):
             await self.respond(writer, 403, self.wrong_name_page(), "text/html; charset=utf-8", method == "HEAD")
             return
         if path == "/ws":
-            await self.websocket(reader, writer, method, headers)
+            if not self.signed_in(headers):
+                await self.respond(writer, 401, b"Sign in first\n")
+                return None
+            return method, headers
+        if method == "POST" and path in ("/api/login", "/api/logout"):
+            if "transfer-encoding" in headers or not headers.get("content-length", "").isdigit():
+                await self.respond(writer, 400, b"Content-Length needed\n")
+                return
+            if int(headers["content-length"]) > MAX_BODY:
+                await self.respond(writer, 413, b"Too much\n")
+                return
+            body = await asyncio.wait_for(reader.readexactly(int(headers["content-length"])), 10)
+            if not same_origin(headers):
+                await self.respond(writer, 403, b"Cross-site request refused\n")
+                return
+            if path == "/api/login":
+                await self.sign_in(writer, headers, body, source)
+            else:
+                gone = "Set-Cookie: %s=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict" % auth.COOKIE
+                await self.respond_json(writer, 200, {"ok": True}, extra=(gone,))
             return
         if method not in ("GET", "HEAD"):
-            await self.respond(writer, 405, b"Only GET is supported\n", extra=("Allow: GET, HEAD",))
+            await self.respond(writer, 405, b"Not allowed here\n", extra=("Allow: GET, HEAD",))
             return
         head_only = method == "HEAD"
+        if path == "/api/session":
+            answer = {
+                "signed_in": self.signed_in(headers),
+                "ready": self.auth is not None,
+                "wait": math.ceil(self.throttle.wait(source)),
+            }
+            await self.respond_json(writer, 200, answer, head_only)
+            return
         if path == "/api/status":
-            body = json.dumps(self.status(), indent=1).encode()
-            await self.respond(writer, 200, body, "application/json", head_only)
+            if not from_this_pi and not self.signed_in(headers):
+                await self.respond_json(writer, 401, {"error": "Sign in first"}, head_only)
+                return
+            await self.respond_json(writer, 200, self.status(), head_only)
+            return
+        if path.startswith("/api/"):
+            await self.respond(writer, 404, b"Not found\n", head_only=head_only)
             return
         target_file = self.find_file(path)
         if target_file is None:
@@ -618,6 +863,9 @@ def main():
     parser.add_argument("--www", default=str(Path(__file__).resolve().parent / "www"), help="folder of web app files")
     parser.add_argument("--serial", default="/dev/serial0", help="serial port to the mixer core, or '' for none")
     parser.add_argument("--baud", type=int, default=115200, choices=sorted(BAUD_RATES))
+    parser.add_argument("--auth", default="/run/campmixer/web-auth.json", help="what netconf.py wrote for checking PINs")
+    parser.add_argument("--state", default="/run/campmixer-bridge/sign-in.json",
+                        help="where the count of wrong PINs is kept between restarts of the bridge, or '' for nowhere")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
     sys.exit(asyncio.run(run(args)))

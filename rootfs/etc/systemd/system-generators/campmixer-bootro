@@ -1,9 +1,13 @@
 #!/bin/sh
-# systemd generator, run at the very start of every start-up.
+# systemd generator, run at the very start of every start-up. It sets how the boot partition is mounted.
 #
-# While the card is locked (the system is running on overlayroot's layer in memory) the boot partition is
-# mounted read-only as well, so nothing on the card is open for writing. Being locked is decided by one
-# word in cmdline.txt and nothing else: /etc/fstab is never edited, so the two cannot disagree.
+# Always: only root may read it. campmixer.txt on it holds the Wi-Fi password, the web app's PIN and perhaps
+# the login password, and the FAT file system has no permissions of its own, so without this every program
+# on the Pi could read them.
+#
+# While the card is locked (the system is running on overlayroot's layer in memory): read-only as well, so
+# nothing on the card is open for writing. Being locked is decided by one word in cmdline.txt and nothing
+# else: /etc/fstab is never edited, so the two cannot disagree.
 #
 # CAMPMIXER_MOUNTS and CAMPMIXER_FSTAB point the tests at pretend files.
 set -eu
@@ -12,19 +16,33 @@ out="${1:-/run/systemd/generator}"
 mounts="${CAMPMIXER_MOUNTS:-/proc/mounts}"
 fstab="${CAMPMIXER_FSTAB:-/etc/fstab}"
 
+# The type and options the boot partition has in fstab (overlayroot keeps that line as it was).
+line="$(awk '$1 !~ /^#/ && $2 == "/boot/firmware" { print $3, $4; exit }' "$fstab" 2>/dev/null || true)"
+type="${line%% *}"
+options="${line#* }"
+[ -n "$line" ] && [ -n "$options" ] || exit 0
+wanted="$options"
+
+# Root only. Left alone if fstab already says who may read it, or if it is not FAT (which would refuse the option).
+if [ "$type" = vfat ]; then
+	case ",$options," in
+	*,umask=* | *,fmask=* | *,dmask=* | *,uid=* | *,gid=*) ;;
+	*) wanted="$wanted,umask=0077" ;;
+	esac
+fi
+
 # Locked means / really is the overlay, whatever was asked for.
-[ "$(awk '$2 == "/" { type = $3 } END { print type }' "$mounts" 2>/dev/null || true)" = overlay ] || exit 0
+if [ "$(awk '$2 == "/" { type = $3 } END { print type }' "$mounts" 2>/dev/null || true)" = overlay ]; then
+	case ",$options," in
+	*,ro,*) ;;
+	*) wanted="$wanted,ro" ;;
+	esac
+fi
 
-# The options the boot partition has in fstab (overlayroot keeps that line as it was).
-options="$(awk '$1 !~ /^#/ && $2 == "/boot/firmware" { print $4; exit }' "$fstab" 2>/dev/null || true)"
-[ -n "$options" ] || exit 0
-case ",$options," in
-*,ro,*) exit 0 ;;
-esac
-
+[ "$wanted" != "$options" ] || exit 0
 mkdir -p "$out/boot-firmware.mount.d"
-cat >"$out/boot-firmware.mount.d/50-campmixer-ro.conf" <<CONF
-# Written at start-up by /etc/systemd/system-generators/campmixer-bootro: the card is locked.
+cat >"$out/boot-firmware.mount.d/50-campmixer.conf" <<CONF
+# Written at start-up by /etc/systemd/system-generators/campmixer-bootro.
 [Mount]
-Options=$options,ro
+Options=$wanted
 CONF

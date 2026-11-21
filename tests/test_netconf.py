@@ -4,6 +4,7 @@
 If nmcli is installed, every generated profile is also read back by NetworkManager's own parser
 and the name and password escaping is compared with what nmcli itself writes.
 """
+import grp
 import json
 import os
 import re
@@ -17,9 +18,11 @@ NETCONF = os.path.join(HERE, "..", "rootfs", "opt", "campmixer", "netconf.py")
 FAKE_NMCLI = os.path.join(HERE, "fake_nmcli.py")
 os.chmod(FAKE_NMCLI, 0o755)
 NMCLI = shutil.which("nmcli")
-BASE = "WIFI_NAME=CampMixer\nWIFI_PASSWORD=abcd-efgh-jkmn\n"
+BASE = "WIFI_NAME=CampMixer\nWIFI_PASSWORD=abcd-efgh-jkmn\nWEB_PIN=48271935\n"
 ONBOARD, USB = ("wlan0", "brcmfmac"), ("wlan1", "mt76x2u")
 MADE_UP = r"[a-z2-9]{4}-[a-z2-9]{4}-[a-z2-9]{4}"
+# The bridge's group does not exist on the machine running the tests, so the tester's own group stands in.
+os.environ["CAMPMIXER_BRIDGE_GROUP"] = grp.getgrgid(os.getgid()).gr_name
 
 
 def make_root(settings, radios):
@@ -222,7 +225,7 @@ done = run(ansi, "apply")
 assert done.returncode == 0 and "Traceback" not in done.stderr, done.stderr
 assert "not saved as UTF-8" in done.stderr and "WIFI_PASSWORD was blank" in done.stderr, done.stderr
 after = raw_settings(ansi)
-assert after.startswith(b"# Jordan\x92s mixer\nWIFI_NAME=Caf\xe9 PA\nWIFI_PASSWORD=") and after.endswith(b"JOIN_WIFI_1=Jordan\x92s iPhone\n"), after
+assert after.startswith(b"# Jordan\x92s mixer\nWIFI_NAME=Caf\xe9 PA\nWIFI_PASSWORD=") and b"\nJOIN_WIFI_1=Jordan\x92s iPhone\nWEB_PIN=" in after, after
 assert re.search(rb"^WIFI_PASSWORD=[a-z2-9]{4}-[a-z2-9]{4}-[a-z2-9]{4}$", after, re.M), after  # untouched lines byte for byte
 assert "campmixer-ap" in profiles(ansi) and "campmixer-join-1" in profiles(ansi)
 done = run(ansi, "set", "WIFI_NAME=Camp PA")
@@ -234,13 +237,13 @@ bom = raw_root(b"\xef\xbb\xbfWIFI_NAME=Caf\xc3\xa9 PA\r\nWIFI_PASSWORD=long enou
 done = run(bom, "apply")
 assert done.returncode == 0 and "UTF-8" not in done.stderr, done.stderr
 assert profile(bom, "campmixer-ap")["wifi"]["ssid"] == "".join("%d;" % byte for byte in "Café PA".encode()), profile(bom, "campmixer-ap")["wifi"]
-utf16 = raw_root("# Jordan’s\r\nWIFI_NAME=Camp\r\nWIFI_PASSWORD=long enough\r\n".encode("utf-16"))  # Notepad's "Unicode"
+utf16 = raw_root("# Jordan’s\r\nWIFI_NAME=Camp\r\nWIFI_PASSWORD=long enough\r\nWEB_PIN=48271935\r\n".encode("utf-16"))  # Notepad's "Unicode"
 done = run(utf16, "apply")
 assert done.returncode == 0 and "UTF-8" not in done.stderr, done.stderr
 assert profile(utf16, "campmixer-ap")["wifi-security"]["psk"] == "long enough" and profile(utf16, "campmixer-ap")["wifi"]["ssid"] == "Camp"
 assert raw_settings(utf16)[:2] == b"\xff\xfe"  # nothing needed changing, so the file was left exactly as it was
 assert run(utf16, "set", "WIFI_NAME=Camp Two").returncode == 0  # a change rewrites it, as UTF-8
-assert raw_settings(utf16) == "# Jordan’s\nWIFI_NAME=Camp Two\nWIFI_PASSWORD=long enough\n".encode("utf-8"), raw_settings(utf16)
+assert raw_settings(utf16) == "# Jordan’s\nWIFI_NAME=Camp Two\nWIFI_PASSWORD=long enough\nWEB_PIN=48271935\n".encode("utf-8"), raw_settings(utf16)
 torn = raw_root(b"\xff\xfeW\x00I\x00\x00\xd8")  # says UTF-16 but is cut off mid-character
 assert run(torn, "apply").returncode == 0 and "campmixer-ap" in profiles(torn)
 
@@ -251,8 +254,9 @@ assert "campmixer-ap" in profiles(stuck)  # from an earlier start-up, when all w
 os.remove(stuck + "/boot/firmware/campmixer.txt")
 os.makedirs(stuck + "/boot/firmware/campmixer.txt")  # a folder where the file should be: it cannot be written
 done = run(stuck, "apply")
-assert done.returncode == 0 and "could not save a new Wi-Fi password" in done.stderr, done.stderr
+assert done.returncode == 0 and "could not save a new WIFI_PASSWORD and WEB_PIN" in done.stderr, done.stderr
 assert "campmixer-ap" not in profiles(stuck) and "campmixer-eth" in profiles(stuck)
+assert not os.path.exists(stuck + "/run/campmixer/web-auth.json")  # and nobody can sign in to the web app either
 assert os.listdir(stuck + "/boot/firmware") == ["campmixer.txt"]  # no half-written file left lying about
 shown = run(stuck, "show")
 assert shown.returncode == 1 and "own Wi-Fi is off" in shown.stdout, shown.stdout
@@ -300,6 +304,10 @@ for refused, reason in (
     (["WIFI_CHANNEL=36"], "WIFI_CHANNEL 36 is not a 2.4 GHz channel."),
     (["WIFI_RADIO=both"], "WIFI_RADIO must be auto, usb or onboard."),
     (["JOIN_WIFI_1_PASSWORD=short"], "JOIN_WIFI_1_PASSWORD must be 8 to 63 characters, or blank."),
+    (["WEB_PIN=12345"], "WEB_PIN must be 6 to 12 digits."),
+    (["WEB_PIN="], "WEB_PIN must be 6 to 12 digits."),
+    (["WEB_PIN=4827193x"], "WEB_PIN must be 6 to 12 digits."),
+    (["WEB_PIN=123456"], "WEB_PIN is one of the first a stranger would try."),
 ):
     done = run(edit, "set", *refused)
     assert done.returncode == 2 and "Not changed: " + reason in done.stderr, (refused, done.stderr)
@@ -310,8 +318,111 @@ assert run(edit, "set", "WIFI_PASSWORD=a new long password").returncode == 0
 assert profile(edit, "campmixer-ap")["wifi-security"]["psk"] == "a new long password"
 assert run(edit, "set", "LOGIN_PASSWORD=").returncode == 0
 shown = run(edit, "show")
-assert "site-password" not in shown.stdout and "Camp Site" in shown.stdout
-assert "new-password" in run(edit, "show", "--passwords").stdout
+assert "site-password" not in shown.stdout and "Camp Site" in shown.stdout and "48271935" not in shown.stdout
+assert "Web app PIN:        ********" in shown.stdout, shown.stdout
+shown = run(edit, "show", "--passwords")
+assert "new-password" in shown.stdout and "Web app PIN:        48271935" in shown.stdout, shown.stdout
+
+# --- 6b. the web app's PIN: made up if there is none, and handed to the bridge as a hash, never as itself
+sys.path.insert(0, os.path.dirname(NETCONF))
+import campmixer_auth  # noqa: E402
+
+
+def auth_file(root_dir):
+    with open(root_dir + "/run/campmixer/web-auth.json") as handle:
+        return json.load(handle)
+
+
+def mode(path):
+    return os.stat(path).st_mode & 0o777
+
+
+pins = make_root("WIFI_NAME=CampMixer\nWIFI_PASSWORD=abcd-efgh-jkmn\n", [USB])  # no PIN in the file at all
+done = run(pins, "apply")
+made = re.search(r"^WEB_PIN=(\d{8})$", settings_file(pins), re.M)
+assert done.returncode == 0 and made and "WEB_PIN was blank, so a new one was made up" in done.stderr, (done.stderr, settings_file(pins))
+pin = made.group(1)
+assert campmixer_auth.pin_problem(pin) is None
+key_file = pins + "/var/lib/campmixer/web-key"
+with open(key_file) as handle:
+    key = handle.read()
+assert re.fullmatch(r"[0-9a-f]{64}\n", key) and mode(key_file) == 0o600
+first = auth_file(pins)
+assert pin not in json.dumps(first) and key.strip() not in json.dumps(first)  # neither the PIN nor the key is in it
+checker = campmixer_auth.Verifier(first)
+assert checker.check_pin(pin) and not checker.check_pin("%08d" % ((int(pin) + 1) % 10**8))
+# Root writes it and only the bridge's group may read it (run as an ordinary user, the tests cannot hand it over).
+assert mode(pins + "/run/campmixer/web-auth.json") == (0o640 if os.geteuid() == 0 else 0o600)
+assert mode(pins + "/run/campmixer") == 0o750
+assert os.listdir(pins + "/run/campmixer") == ["web-auth.json"]
+# Start-up after start-up it stays the same, so a phone that signed in stays signed in.
+again = run(pins, "apply")
+assert "made up" not in again.stderr and auth_file(pins) == first and open(key_file).read() == key
+token = checker.new_token()
+assert campmixer_auth.Verifier(auth_file(pins)).token_ok(token)
+
+shown = run(pins, "pin")
+assert shown.returncode == 0 and shown.stdout.strip() == pin
+done = run(pins, "pin", "9051 7362")  # spaces are for reading, not part of it
+assert done.returncode == 0 and "The PIN is now 90517362" in done.stdout and "sign in again" in done.stdout, done.stdout + done.stderr
+assert "WEB_PIN=90517362\n" in settings_file(pins) and pin not in settings_file(pins)
+changed = campmixer_auth.Verifier(auth_file(pins))
+assert changed.check_pin("90517362") and not changed.check_pin(pin)
+assert not changed.token_ok(token)  # changing the PIN signs every phone out
+assert open(key_file).read() == key
+before = settings_file(pins)
+for refused, reason in ((["123456"], "one of the first"), (["111111"], "one of the first"), (["12345"], "6 to 12 digits"),
+                        (["1234567890123"], "6 to 12 digits"), (["48271x35"], "6 to 12 digits"), ([""], "6 to 12 digits")):
+    done = run(pins, "pin", *refused)
+    assert done.returncode == 2 and "Not changed: the PIN" in done.stderr and reason in done.stderr, (refused, done.stderr)
+    assert settings_file(pins) == before and campmixer_auth.Verifier(auth_file(pins)).check_pin("90517362")
+done = run(pins, "pin", "--new")
+fresh = re.search(r"The PIN is now (\d{8})\.", done.stdout)
+assert done.returncode == 0 and fresh and fresh.group(1) != "90517362", done.stdout + done.stderr
+assert campmixer_auth.Verifier(auth_file(pins)).check_pin(fresh.group(1)) and "WEB_PIN=%s\n" % fresh.group(1) in settings_file(pins)
+assert run(pins, "set", "WEB_PIN=663 104").returncode == 0
+assert campmixer_auth.Verifier(auth_file(pins)).check_pin("663104")
+
+# One that anyone would guess is replaced at start-up, like a blank one. So is one that is not a PIN at all.
+for typed in ("123456", "000000", "1234", "12121212", "hunter2", "１２３４５６７８"):
+    weak = make_root("WIFI_PASSWORD=abcd-efgh-jkmn\nWEB_PIN=%s\n# end\n" % typed, [USB])
+    done = run(weak, "apply")
+    made = re.search(r"^WEB_PIN=(\d{8})$", settings_file(weak), re.M)
+    assert made and "WEB_PIN was not usable or too easy to guess" in done.stderr, (typed, done.stderr, settings_file(weak))
+    assert settings_file(weak).endswith("\n# end\n") and not campmixer_auth.weak_pin(made.group(1))
+    assert campmixer_auth.Verifier(auth_file(weak)).check_pin(made.group(1))
+
+# Every card makes up its own key and its own PIN: nothing is shared between two mixers.
+other = make_root("WIFI_PASSWORD=abcd-efgh-jkmn\n", [USB])
+run(other, "apply")
+assert open(other + "/var/lib/campmixer/web-key").read() != key
+assert auth_file(other)["session_key"] != first["session_key"] and auth_file(other)["salt"] != first["salt"]
+same_pin = make_root("WIFI_PASSWORD=abcd-efgh-jkmn\nWEB_PIN=%s\n" % pin, [USB])  # the same PIN on another mixer
+run(same_pin, "apply")
+assert auth_file(same_pin)["hash"] != first["hash"] and not campmixer_auth.Verifier(auth_file(same_pin)).token_ok(token)
+
+# A damaged key is replaced (everyone signs in again) rather than used.
+with open(key_file, "w") as handle:
+    handle.write("not a key\n")
+assert run(pins, "apply").returncode == 0
+assert re.fullmatch(r"[0-9a-f]{64}\n", open(key_file).read()) and open(key_file).read() != key
+# "web-key" makes the key and nothing else. "campmixer lock" runs it while the card can still be written.
+bare = make_root(BASE, [USB])
+assert run(bare, "web-key").returncode == 0
+assert mode(bare + "/var/lib/campmixer/web-key") == 0o600 and not os.path.exists(bare + "/run/campmixer")
+kept = open(bare + "/var/lib/campmixer/web-key").read()
+assert run(bare, "apply").returncode == 0 and open(bare + "/var/lib/campmixer/web-key").read() == kept
+# A key that cannot be kept (a card too broken to write) still lets people sign in, for this start-up.
+broken = make_root(BASE, [USB])
+with open(broken + "/var/lib/campmixer", "w") as handle:
+    handle.write("a file where the folder should be")
+done = run(broken, "apply")
+assert done.returncode == 0 and "could not keep this Pi's key" in done.stderr, done.stderr
+assert campmixer_auth.Verifier(auth_file(broken)).check_pin("48271935")
+# Without the bridge's group there is nobody to hand the file to: it stays root's alone, and that is said.
+alone = make_root(BASE, [USB])
+done = run(alone, "apply", CAMPMIXER_BRIDGE_GROUP="no-such-group-here")
+assert "there is no group called no-such-group-here" in done.stderr and mode(alone + "/run/campmixer/web-auth.json") == 0o600
 
 # --- 7. NetworkManager's own tools agree with what was written
 if NMCLI:

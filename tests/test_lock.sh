@@ -1,6 +1,6 @@
 #!/bin/bash
 # Checks the two start-up pieces that follow the lock:
-#   campmixer-bootro  (systemd generator)  boot partition read-only while locked
+#   campmixer-bootro  (systemd generator)  boot partition for root only, and read-only while locked
 #   campmixer-nofsck  (initramfs script)   no file system check, and so no write, while locked
 set -euo pipefail
 
@@ -8,7 +8,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GENERATOR="$HERE/../rootfs/etc/systemd/system-generators/campmixer-bootro"
 NOFSCK="$HERE/../rootfs/etc/initramfs-tools/scripts/init-premount/campmixer-nofsck"
 WORK="$(mktemp -d)"
-DROPIN="boot-firmware.mount.d/50-campmixer-ro.conf"
+DROPIN="boot-firmware.mount.d/50-campmixer.conf"
 
 fail() {
 	echo "FAIL: $*" >&2
@@ -37,22 +37,30 @@ tmpfs-root /media/root-rw tmpfs rw,relatime 0 0
 overlayroot / overlay rw,relatime,lowerdir=/media/root-ro,upperdir=/media/root-rw/overlay,workdir=/media/root-rw/overlay-workdir/_,uuid=on 0 0
 tmpfs /run tmpfs rw,nosuid,nodev,size=187768k,nr_inodes=819200,mode=755 0 0'
 
-# Unlocked: the stock mount is left alone.
+# Unlocked: writable, but for root only, because the settings file on it holds the passwords and the PIN.
 out="$(generate unlocked "$UNLOCKED" "$STOCK_LINE")"
-[ ! -e "$out" ] || fail "unlocked: something was written"
+grep -qx 'Options=defaults,umask=0077' "$out/$DROPIN" || fail "unlocked: $(cat "$out/$DROPIN" 2>&1)"
+grep -qx '\[Mount\]' "$out/$DROPIN" || fail "unlocked: no [Mount] section"
 
-# Locked: read-only is added to the options fstab has. This is the line as overlayroot leaves it.
+# Locked: read-only as well. This is the line as overlayroot leaves it.
 out="$(generate locked "$LOCKED" 'PARTUUID=3a1867d2-01 /boot/firmware vfat defaults 0 2 # overlayroot:fs-unsupported')"
-grep -qx 'Options=defaults,ro' "$out/$DROPIN" || fail "locked: $(cat "$out/$DROPIN" 2>&1)"
-grep -qx '\[Mount\]' "$out/$DROPIN" || fail "locked: no [Mount] section"
+grep -qx 'Options=defaults,umask=0077,ro' "$out/$DROPIN" || fail "locked: $(cat "$out/$DROPIN" 2>&1)"
 
-# Other options are kept.
-out="$(generate options "$LOCKED" 'PARTUUID=3a1867d2-01  /boot/firmware  vfat    defaults,flush,umask=0077  0  2')"
-grep -qx 'Options=defaults,flush,umask=0077,ro' "$out/$DROPIN" || fail "options: $(cat "$out/$DROPIN" 2>&1)"
+# Other options are kept, and a choice fstab already makes about who may read it is left alone.
+out="$(generate options "$LOCKED" 'PARTUUID=3a1867d2-01  /boot/firmware  vfat    defaults,flush,umask=0027  0  2')"
+grep -qx 'Options=defaults,flush,umask=0027,ro' "$out/$DROPIN" || fail "options: $(cat "$out/$DROPIN" 2>&1)"
+out="$(generate chosen "$UNLOCKED" 'PARTUUID=3a1867d2-01  /boot/firmware  vfat    defaults,fmask=0137,dmask=0027  0  2')"
+[ ! -e "$out" ] || fail "fstab's own choice: something was written"
 
-# Already read-only in fstab (a card locked by raspi-config): nothing to add.
+# Already read-only in fstab (a card locked by raspi-config): only the root-only part is added.
 out="$(generate already "$LOCKED" 'PARTUUID=3a1867d2-01  /boot/firmware  vfat    defaults,ro          0       2')"
-[ ! -e "$out" ] || fail "already read-only: something was written"
+grep -qx 'Options=defaults,ro,umask=0077' "$out/$DROPIN" || fail "already read-only: $(cat "$out/$DROPIN" 2>&1)"
+
+# Not FAT: it would refuse the option and not mount at all, so only read-only is added, and only when locked.
+out="$(generate ext4 "$UNLOCKED" 'PARTUUID=3a1867d2-01  /boot/firmware  ext4    defaults  0  2')"
+[ ! -e "$out" ] || fail "ext4, unlocked: something was written"
+out="$(generate ext4locked "$LOCKED" 'PARTUUID=3a1867d2-01  /boot/firmware  ext4    defaults  0  2')"
+grep -qx 'Options=defaults,ro' "$out/$DROPIN" || fail "ext4, locked: $(cat "$out/$DROPIN" 2>&1)"
 
 # No boot partition line, or only a commented one: nothing to do, and no error.
 out="$(generate missing "$LOCKED" '')"
@@ -63,14 +71,14 @@ out="$(generate commented "$LOCKED" '#PARTUUID=3a1867d2-01  /boot/firmware  vfat
 # An overlay somewhere else (a container, say) does not count as locked.
 out="$(generate elsewhere "$UNLOCKED
 overlay /var/lib/thing/merged overlay rw,relatime,lowerdir=/a,upperdir=/b,workdir=/c 0 0" "$STOCK_LINE")"
-[ ! -e "$out" ] || fail "overlay elsewhere: something was written"
+grep -qx 'Options=defaults,umask=0077' "$out/$DROPIN" || fail "overlay elsewhere: $(cat "$out/$DROPIN" 2>&1)"
 
 # Neither a missing fstab nor a missing mount table may stop the start-up.
 printf '%s\n' "$LOCKED" >"$WORK/mounts"
 CAMPMIXER_MOUNTS="$WORK/mounts" CAMPMIXER_FSTAB="$WORK/none" sh "$GENERATOR" "$WORK/nofstab" || fail "no fstab: the generator failed"
 [ ! -e "$WORK/nofstab" ] || fail "no fstab: something was written"
 CAMPMIXER_MOUNTS="$WORK/none" CAMPMIXER_FSTAB="$WORK/fstab" sh "$GENERATOR" "$WORK/nomounts" || fail "no mount table: the generator failed"
-[ ! -e "$WORK/nomounts" ] || fail "no mount table: something was written"
+grep -qx 'Options=defaults,umask=0077' "$WORK/nomounts/$DROPIN" || fail "no mount table: $(cat "$WORK/nomounts/$DROPIN" 2>&1)"
 
 # ---- the file system check
 

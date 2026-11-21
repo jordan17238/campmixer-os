@@ -61,8 +61,16 @@ done <<'EOF'
 755 opt/campmixer/netconf.py
 755 opt/campmixer/firststart.py
 644 opt/campmixer/campmixer_link.py
+644 opt/campmixer/campmixer_auth.py
 644 opt/campmixer/VERSION
 644 opt/campmixer/www/index.html
+644 opt/campmixer/www/app.js
+644 opt/campmixer/www/mixer-link.js
+644 opt/campmixer/www/app.css
+644 opt/campmixer/www/manifest.webmanifest
+644 opt/campmixer/www/icon.svg
+644 etc/ssh/sshd_config.d/10-campmixer.conf
+600 var/lib/campmixer/web-key
 755 usr/local/bin/campmixer
 755 etc/systemd/system-generators/campmixer-bootro
 755 etc/initramfs-tools/scripts/init-premount/campmixer-nofsck
@@ -87,12 +95,24 @@ grep -qxF "psk=$password" "$root/etc/NetworkManager/system-connections/campmixer
 	fail "the access point does not use the password in campmixer.txt"
 grep -q "Own Wi-Fi password: $password" "$root/install.log" || fail "the installer did not show the password"
 
+# The web app's PIN: made up, shown, and handed to the bridge as a hash only.
+pin="$(sed -n 's/^WEB_PIN=//p' "$settings")"
+[[ "$pin" =~ ^[0-9]{8}$ ]] || fail "no PIN was made up: '$pin'"
+grep -q "Web app PIN:        $pin" "$root/install.log" || fail "the installer did not show the PIN"
+[ -s "$root/run/campmixer/web-auth.json" ] || fail "the bridge was given nothing to check the PIN with"
+! grep -q "$pin" "$root/run/campmixer/web-auth.json" || fail "the PIN itself is in the bridge's file"
+! grep -q "$(cat "$root/var/lib/campmixer/web-key")" "$root/run/campmixer/web-auth.json" || fail "the Pi's key is in the bridge's file"
+# Every file the page asks for is one the installer puts there.
+for asked in $(grep -oE '(src|href)="/[^"]+"' "$root/opt/campmixer/www/index.html" | cut -d'"' -f2); do
+	[ -f "$root/opt/campmixer/www$asked" ] || fail "the page asks for $asked, which is not installed"
+done
+
 # ---- running it again changes nothing, and clears out the command's old place
 mkdir -p "$root/usr/local/sbin"
 echo old >"$root/usr/local/sbin/campmixer"
-before="$(cat "$config" "$root/boot/firmware/cmdline.txt" "$settings" "$root/etc/hosts" | sha256sum)"
+before="$(cat "$config" "$root/boot/firmware/cmdline.txt" "$settings" "$root/etc/hosts" "$root/var/lib/campmixer/web-key" | sha256sum)"
 install_into "$root"
-after="$(cat "$config" "$root/boot/firmware/cmdline.txt" "$settings" "$root/etc/hosts" | sha256sum)"
+after="$(cat "$config" "$root/boot/firmware/cmdline.txt" "$settings" "$root/etc/hosts" "$root/var/lib/campmixer/web-key" | sha256sum)"
 [ "$before" = "$after" ] || fail "a second run changed the boot files"
 [ ! -e "$root/usr/local/sbin/campmixer" ] || fail "the old copy of the command was left behind"
 grep -q 'ExecStart=/usr/local/bin/campmixer firststart' "$root/etc/systemd/system/campmixer-firststart.service" ||
@@ -121,6 +141,11 @@ img="$(make_root "$STOCK")"
 install_into "$img" CAMPMIXER_IMAGE_BUILD=1
 grep -qx 'WIFI_PASSWORD=' "$img/boot/firmware/campmixer.txt" || fail "an image must not carry a Wi-Fi password"
 grep -qx 'LOGIN_PASSWORD=' "$img/boot/firmware/campmixer.txt" || fail "an image must not carry a login password"
+grep -qx 'WEB_PIN=' "$img/boot/firmware/campmixer.txt" || fail "an image must not carry a PIN"
+# Nor a key: one that everybody can download would let anybody sign their own cookies.
+[ ! -e "$img/var/lib/campmixer/web-key" ] || fail "an image must not carry the key the web app's cookies are signed with"
+[ ! -e "$img/run/campmixer" ] || fail "the bridge's sign-in file was written at build time"
+[ -z "$(find "$img/var/lib/campmixer" -type f ! -name first-start)" ] || fail "the image has more than the first-start marker: $(ls "$img/var/lib/campmixer")"
 [ -e "$img/var/lib/campmixer/first-start" ] || fail "first-start marker missing from the image"
 [ ! -e "$img/etc/NetworkManager/system-connections" ] || fail "network profiles were written at build time"
 [ "$(cat "$img/boot/firmware/cmdline.txt")" = "console=tty1 root=ROOTDEV rootfstype=ext4 fsck.repair=yes rootwait resize cfg80211.ieee80211_regdom=AU" ] ||

@@ -1,7 +1,9 @@
 [Unit]
 Description=CampMixer bridge: serial link to the mixer core, web app for phones
 Documentation=file:/opt/campmixer/bridge.py
-After=network.target
+# campmixer-netconf writes the file this needs for checking the web app's PIN.
+After=network.target campmixer-netconf.service
+Wants=campmixer-netconf.service
 ConditionPathExists=/opt/campmixer/bridge.py
 
 [Service]
@@ -16,12 +18,41 @@ ExecStart=/usr/bin/python3 /opt/campmixer/bridge.py --port 80 --serial /dev/seri
 Restart=always
 RestartSec=1
 WatchdogSec=15
+# The count of wrong PINs is kept in here. It outlives a restart of the bridge, so making the bridge
+# fall over does not buy anyone a fresh set of guesses.
+RuntimeDirectory=campmixer-bridge
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+
+# This is the one part of the mixer that anybody on the network can talk to. It gets the serial port,
+# the network and its own files, and nothing else of the Pi.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-# The settings file holds passwords. The part that talks to the network has no business reading it.
+# The settings file holds the passwords and the PIN. The part that talks to the network has no business reading it.
 InaccessiblePaths=-/boot/firmware
+UMask=0077
+# Of the Pi's devices, only serial ports.
+DevicePolicy=closed
+DeviceAllow=char-ttyAMA rw
+DeviceAllow=char-ttyS rw
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+TasksMax=64
 
 [Install]
 WantedBy=multi-user.target
