@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """A stand-in for the mixer core (the Teensy), for testing the web app with no mixer.
 
-It speaks PROTOCOL.md layer 2, version 1: it keeps a level and a mute for each input and the master, answers
-GET_STATE and SET with STATE, and sends METERS 20 times a second. It changes no sound: there is none.
+It speaks PROTOCOL.md layer 2, version 2: it keeps a level and a mute for each input and each output (any number
+of either), says how many there are, answers GET_STATE and SET, and sends METERS 20 times a second. It changes no
+sound: there is none.
 
 Used by the tests. It can also be run by hand against a serial port, for example a USB serial adaptor wired
 to the Pi's header pins 8 and 10 (crossed over) and ground:
 
-    python3 standin_core.py /dev/ttyUSB0
+    python3 standin_core.py /dev/ttyUSB0 [inputs outputs]
 """
 import math
 import os
@@ -19,11 +20,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "rootfs", "opt", "campmixer"))
 from campmixer_link import FrameDecoder, encode_frame  # noqa: E402
 
-VERSION = 1
-GET_STATE, SET, STATE, METERS = 0x01, 0x02, 0x81, 0x82
+VERSION = 2
+GET_STATE, SET, METERS, INFO, CHANNEL = 0x01, 0x02, 0x82, 0x83, 0x84
 LEVEL, MUTE = 1, 2
 OFF = -32768
 LEVEL_MIN, LEVEL_MAX = -600, 100  # tenths of a dB
+MAX_CHANNELS = 250
 
 
 def clamp_level(value):
@@ -34,33 +36,41 @@ def clamp_level(value):
 
 
 class StandInCore:
-    def __init__(self, names=("MIC 1", "MIC 2", "KEYS", "LAPTOP")):
+    """Any number of inputs and outputs. The channels are numbered inputs first, then outputs."""
+
+    def __init__(self, inputs=4, outputs=1, names=None):
+        assert inputs >= 1 and outputs >= 1 and inputs + outputs <= MAX_CHANNELS
+        self.inputs, self.outputs = inputs, outputs
+        if names is None:
+            names = ["MIC 1", "MIC 2", "KEYS", "LAPTOP"] if inputs == 4 else ["IN %d" % (n + 1) for n in range(inputs)]
+            names += ["MASTER"] if outputs == 1 else ["MAIN"] + ["OUT %d" % (n + 2) for n in range(outputs - 1)]
         self.channels = [{"level": 0, "muted": False, "name": name} for name in names]
-        self.channels.append({"level": 0, "muted": False, "name": "MASTER"})
+        assert len(self.channels) == inputs + outputs
         self.sets = []  # every SET that was acted on, for the tests to look at
         self.on_set = None  # called with (channel, what) after each of them
         self.ticks = 0
+        self.next_refresh = 0
 
-    def state(self):
-        out = bytearray([STATE, VERSION, len(self.channels) - 1])
-        for channel in self.channels:
-            name = channel["name"].encode("utf-8")[:16]
-            out += struct.pack(">hBB", channel["level"], 1 if channel["muted"] else 0, len(name)) + name
-        return bytes(out)
+    def info(self):
+        return bytes([INFO, VERSION, self.inputs, self.outputs])
+
+    def channel(self, number):
+        channel = self.channels[number]
+        name = channel["name"].encode("utf-8")[:16]
+        return bytes([CHANNEL, number]) + struct.pack(">hBB", channel["level"], 1 if channel["muted"] else 0, len(name)) + name
 
     def meters(self):
         """Something lifelike. An input's meter shows what is coming in, whatever its fader and mute are doing;
-        the master's shows what is going out: the loudest input that is up and not muted, through the master."""
+        an output's shows what is going out: the loudest input that is up and not muted, through that output."""
         self.ticks += 1
         out, loudest = bytearray([METERS]), -math.inf
-        for number, channel in enumerate(self.channels[:-1]):
-            source = -18 + 9 * math.sin(self.ticks / (7 + 3 * number))
+        for number, channel in enumerate(self.channels[: self.inputs]):
+            source = -18 + 9 * math.sin(self.ticks / (7 + 3 * (number % 9)))
             if channel["level"] != OFF and not channel["muted"]:
                 loudest = max(loudest, source + channel["level"] / 10)
             out.append(self.meter_byte(source))
-        master = self.channels[-1]
-        peak = -math.inf if master["level"] == OFF or master["muted"] else loudest + master["level"] / 10
-        out.append(self.meter_byte(peak))
+        for channel in self.channels[self.inputs:]:
+            out.append(self.meter_byte(-math.inf if channel["level"] == OFF or channel["muted"] else loudest + channel["level"] / 10))
         return bytes(out)
 
     @staticmethod
@@ -73,7 +83,7 @@ class StandInCore:
         if not payload:
             return []
         if payload[0] == GET_STATE:
-            return [self.state()]
+            return [self.info()] + [self.channel(number) for number in range(len(self.channels))]
         if payload[0] != SET or len(payload) < 5:
             return []  # not for this version, or cut short: ignored
         number, what = payload[1], payload[2]
@@ -90,11 +100,20 @@ class StandInCore:
         self.sets.append((number, what, value))
         if self.on_set:
             self.on_set(channel, what)
-        return [self.state()]
+        return [self.channel(number)]  # only what changed: this is what keeps a big mixer's serial link from filling up
+
+    def refresh(self, count):
+        """The next few channels in turn, so that every channel is said again every few seconds, asked or not."""
+        out = []
+        for _ in range(count):
+            out.append(self.channel(self.next_refresh))
+            self.next_refresh = (self.next_refresh + 1) % len(self.channels)
+        return out
 
     def serve(self, read, write, stop=lambda: False):
         """Run against a serial line: read() returns the bytes waiting (or b''), write(bytes) sends."""
-        decoder, next_meters, next_state = FrameDecoder(), time.monotonic(), time.monotonic()
+        decoder, next_meters, next_info = FrameDecoder(), time.monotonic(), time.monotonic()
+        per_tick = max(1, -(-len(self.channels) // 80))  # every channel within four seconds, at 20 ticks a second
         while not stop():
             for payload in decoder.feed(read()):
                 for answer in self.handle(payload):
@@ -102,17 +121,19 @@ class StandInCore:
             now = time.monotonic()
             if now >= next_meters:
                 write(encode_frame(self.meters()))
+                for answer in self.refresh(per_tick):
+                    write(encode_frame(answer))
                 next_meters = max(now, next_meters + 0.05)
-            if now >= next_state:  # at least once a second, asked or not, so a phone that missed one catches up
-                write(encode_frame(self.state()))
-                next_state = now + 1.0
+            if now >= next_info:  # the heartbeat: once a second, asked or not
+                write(encode_frame(self.info()))
+                next_info = now + 1.0
             time.sleep(0.005)
 
 
 def main():
     import termios
 
-    if len(sys.argv) != 2:
+    if len(sys.argv) not in (2, 4):
         raise SystemExit(__doc__.strip())
     fd = os.open(sys.argv[1], os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
     attrs = termios.tcgetattr(fd)
@@ -133,7 +154,7 @@ def main():
         else:
             print("%s: %s" % (channel["name"], "off" if channel["level"] == OFF else "%+.1f dB" % (channel["level"] / 10)))
 
-    core = StandInCore()
+    core = StandInCore(*(int(word) for word in sys.argv[2:4]))
     core.on_set = report
     print("Stand-in mixer core on %s. Ctrl-C to stop." % sys.argv[1])
     try:

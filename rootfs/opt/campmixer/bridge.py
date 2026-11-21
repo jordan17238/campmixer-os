@@ -252,7 +252,7 @@ class Client:
 
     def __init__(self, writer):
         self.writer = writer
-        self.queue = asyncio.Queue(maxsize=256)
+        self.queue = asyncio.Queue(maxsize=2048)  # room for a big mixer reporting every channel at once
         self.open = True
         self.close_sent = False
 

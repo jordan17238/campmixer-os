@@ -6,80 +6,91 @@
    "hex": "01"
   },
   {
-   "what": "input 1 to -6.0 dB",
+   "what": "channel 0 (input 1) to -6.0 dB",
    "channel": 0,
    "set": 1,
    "value": -60,
    "hex": "020001ffc4"
   },
   {
-   "what": "input 3 to +3.5 dB",
+   "what": "channel 2 (input 3) to +3.5 dB",
    "channel": 2,
    "set": 1,
    "value": 35,
    "hex": "0202010023"
   },
   {
-   "what": "input 2 off",
+   "what": "channel 1 (input 2) off",
    "channel": 1,
    "set": 1,
    "value": -32768,
    "hex": "0201018000"
   },
   {
-   "what": "master to 0.0 dB",
+   "what": "channel 4 (the output) to 0.0 dB",
    "channel": 4,
    "set": 1,
    "value": 0,
    "hex": "0204010000"
   },
   {
-   "what": "master muted",
+   "what": "channel 4 muted",
    "channel": 4,
    "set": 2,
    "value": 1,
    "hex": "0204020001"
   },
   {
-   "what": "input 4 unmuted",
+   "what": "channel 3 unmuted",
    "channel": 3,
    "set": 2,
    "value": 0,
    "hex": "0203020000"
   }
  ],
- "state": {
-  "hex": "810104ffc400054d49432031ff9700054d49432032800000044b455953002301064c4150544f50000000064d4153544552",
-  "version": 1,
+ "info": {
+  "hex": "83020401",
+  "version": 2,
   "inputs": 4,
-  "channels": [
-   {
-    "level": -60,
-    "muted": false,
-    "name": "MIC 1"
-   },
-   {
-    "level": -105,
-    "muted": false,
-    "name": "MIC 2"
-   },
-   {
-    "level": -32768,
-    "muted": false,
-    "name": "KEYS"
-   },
-   {
-    "level": 35,
-    "muted": true,
-    "name": "LAPTOP"
-   },
-   {
-    "level": 0,
-    "muted": false,
-    "name": "MASTER"
-   }
-  ]
+  "outputs": 1
  },
+ "channels": [
+  {
+   "hex": "8400ffc400054d49432031",
+   "channel": 0,
+   "level": -60,
+   "muted": false,
+   "name": "MIC 1"
+  },
+  {
+   "hex": "8401ff9700054d49432032",
+   "channel": 1,
+   "level": -105,
+   "muted": false,
+   "name": "MIC 2"
+  },
+  {
+   "hex": "8402800000044b455953",
+   "channel": 2,
+   "level": -32768,
+   "muted": false,
+   "name": "KEYS"
+  },
+  {
+   "hex": "8403002301064c4150544f50",
+   "channel": 3,
+   "level": 35,
+   "muted": true,
+   "name": "LAPTOP"
+  },
+  {
+   "hex": "8404000000064d4153544552",
+   "channel": 4,
+   "level": 0,
+   "muted": false,
+   "name": "MASTER"
+  }
+ ],
  "meters": {
   "hex": "82000c78ff19",
   "peaks": [

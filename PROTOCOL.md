@@ -1,7 +1,7 @@
 # CampMixer link protocol
 
 Two layers. Layer 1 is the framing between the Pi and the mixer core (the Teensy), and what a browser sees of it.
-Layer 2 is what the bytes inside a frame mean: the messages the web app and the mixer core exchange for volume, mute and meters.
+Layer 2 is what the bytes inside a frame mean: the messages the web app and the mixer core exchange for volume, mute and meters, for however many inputs and outputs the mixer has.
 
 The Pi only carries layer 2. It does not read it, and the mixer's settings never live on the Pi.
 
@@ -43,20 +43,22 @@ Reference code: `rootfs/opt/campmixer/campmixer_link.py`, checked by `tests/test
 
 Signing in: `POST /api/login` with `{"pin": "..."}` as `application/json`. The answer sets the cookie. `GET /api/session` says whether this browser is signed in and how long it must wait before trying a PIN. `POST /api/logout` takes the cookie away.
 
-# Layer 2: mixer messages, version 1
+# Layer 2: mixer messages, version 2
 
 A payload is one message: a type byte, then that message's fields. Numbers longer than one byte are sent high byte first.
 
-The mixer core is the one place the mixer's settings live. The app asks for a change and shows what the core reports back. That is how every phone, and the front panel, stay in step: a change made anywhere comes back to everybody as the core's new state.
+The mixer core is the one place the mixer's settings live. The app asks for a change and shows what the core reports back. That is how every phone, and the front panel, stay in step: a change made anywhere comes back to everybody from the core.
 
-**Channels** are numbered from 0. The inputs come first (0 to 3 on a four-input mixer), then the master, which is always the last one (4).
+**The mixer core says how many inputs and outputs it has.** Nothing on the Pi or in the app assumes a number, so the same CampMixer OS drives a mixer with one input and one output or one with dozens of each. Every input and every output is a **channel** with a level, a mute, a name and a meter. Channels are numbered from 0: the inputs first, then the outputs. On the Camp PA Mixer that is inputs 0 to 3 and one output, channel 4.
+
+Inputs and outputs together can number up to 250 (a channel's number is one byte). What limits a real mixer first is the serial link: see *How many channels* below.
 
 ## To the mixer core
 
 | Type | Name | Fields | Meaning |
 |---|---|---|---|
-| `0x01` | GET_STATE | none | Asks for a STATE. The app sends it when it connects, and again each second for as long as it has had no answer. |
-| `0x02` | SET | channel (1 byte), setting (1 byte), value (2 bytes, signed) | Changes one setting on one channel. The core applies it, within what it allows, and answers with STATE. |
+| `0x01` | GET_STATE | none | Asks where everything stands. The core answers with INFO and then a CHANNEL for every channel. The app sends it when it connects, and again each second for as long as it has not heard about every channel. |
+| `0x02` | SET | channel (1 byte), setting (1 byte), value (2 bytes, signed) | Changes one setting on one channel. The core applies it, within what it allows, and answers with a CHANNEL for that channel. |
 
 Settings:
 
@@ -64,7 +66,7 @@ Settings:
 |---|---|---|
 | 1 | Level | Tenths of a decibel: -600 (-60.0 dB) to +100 (+10.0 dB). -32768 means off, no sound at all. The core treats anything below -600 as off and anything above +100 as +100. The app works in half-decibel steps. |
 | 2 | Mute | 0 is not muted, anything else is muted. |
-| 3 to 7 | (kept for the channel menu) | Gain, 48 V, ground lift, high-pass and feedback filter. Not in version 1: the core ignores them. |
+| 3 to 7 | (kept for the channel menu) | Gain, 48 V, ground lift, high-pass and feedback filter. Not in this version: the core ignores them. |
 
 A SET for a channel or a setting the core does not have, or one that is cut short, is ignored and gets no answer.
 
@@ -72,17 +74,36 @@ A SET for a channel or a setting the core does not have, or one that is cut shor
 
 | Type | Name | Fields | Meaning |
 |---|---|---|---|
-| `0x81` | STATE | version (1 byte, 1), number of inputs (1 byte), then for each channel, inputs first and master last: level (2 bytes, signed), flags (1 byte), length of the name (1 byte, at most 16), the name (UTF-8) | Where everything stands. Flags: bit 0 is mute; the other bits are 0 for now. |
-| `0x82` | METERS | one byte for each channel, inputs first and master last | The highest level since the last METERS, in half-decibel steps below full scale: 0 is full scale (clipping), 1 is -0.5 dB, 254 is -127 dB, 255 is silence. |
+| `0x83` | INFO | version (1 byte, 2), number of inputs (1 byte, at least 1), number of outputs (1 byte, at least 1) | The core's heartbeat: which version it speaks and how many channels it has. |
+| `0x84` | CHANNEL | channel (1 byte), level (2 bytes, signed), flags (1 byte), length of the name (1 byte, at most 16), the name (UTF-8) | Where one channel stands. Flags: bit 0 is mute; the other bits are 0 for now. |
+| `0x82` | METERS | one byte for each channel, inputs first, then outputs | The highest level since the last METERS, in half-decibel steps below full scale: 0 is full scale (clipping), 1 is -0.5 dB, 254 is -127 dB, 255 is silence. |
 
 The core sends:
 
-- **STATE** in answer to every GET_STATE and every SET it acts on, whenever a setting changes at the front panel, and at least once a second regardless, so a phone that missed one catches up.
-- **METERS** 20 times a second. An input's meter shows what is coming in on it (after its gain, before its fader and mute), so a microphone can be seen to be alive before it is brought up. The master's meter shows what is going out.
+- **INFO** at least once a second, and first in its answer to GET_STATE.
+- **CHANNEL** for every channel in answer to GET_STATE; for the one channel concerned in answer to a SET it acts on, and whenever a setting changes at the front panel; and for every channel in turn, so that each is said again at least once every five seconds, asked or not. That way a phone that missed one catches up, and a change costs one small message however big the mixer is.
+- **METERS** 20 times a second. An input's meter shows what is coming in on it (after its gain, before its fader and mute), so a microphone can be seen to be alive before it is brought up. An output's meter shows what is going out of it.
 
-The app treats the mixer as out of reach, and greys its controls, when the Pi reports the link down or no STATE has arrived for 3.5 seconds.
+What reaches which output is the core's business in this version: the app sets each output's level and mute.
 
-A receiver ignores any message whose type it does not know, and any message too short for its type. A core that speaks a later version says so in STATE's version byte, and an app that does not know that version shows no controls rather than guess.
+The app builds a strip for every channel as soon as INFO has told it how many there are, and greys each one until its CHANNEL has arrived. It treats the mixer as out of reach, and greys everything, when the Pi reports the link down or no INFO has arrived for 3.5 seconds.
+
+A receiver ignores any message whose type it does not know, and any message too short for its type. A core that speaks another version says so in INFO's version byte, and an app that does not know that version shows no controls rather than guess.
+
+## How many channels
+
+The Pi only passes messages on, so it is not what sets the limit. The serial link is. At 115200 baud it carries about 11,500 bytes a second, and the meters are the steady load: one byte a channel, 20 times a second.
+
+| Channels (inputs and outputs together) | Steady load at 115200 baud |
+|---|---|
+| 5 (the Camp PA Mixer) | about 2 percent |
+| 56 (48 inputs, 8 outputs) | about 15 percent |
+| 100 | about 25 percent |
+| 250 | about 55 percent |
+
+That leaves room at any size the numbering allows, but a core with more than a hundred or so channels should run the link faster. The bridge takes `--baud` up to 921600 (in `campmixer-bridge.service`), and the core has to match.
+
+In the app, the meters of strips that are off the screen are not redrawn, which is what keeps a long mixer smooth on a phone.
 
 ## Examples
 
@@ -90,23 +111,23 @@ These are checked by the tests, against both the web app's code and the stand-in
 
 | Message | Bytes (hex) |
 |---|---|
-| Ask for the state | `01` |
-| Input 1 to -6.0 dB | `02 00 01 FF C4` |
-| Input 3 to +3.5 dB | `02 02 01 00 23` |
-| Input 2 off | `02 01 01 80 00` |
-| Master muted | `02 04 02 00 01` |
-| METERS: input 1 clipping, input 2 at -6 dB, input 3 at -60 dB, input 4 silent, master at -12.5 dB | `82 00 0C 78 FF 19` |
+| Ask where everything stands | `01` |
+| Channel 0 to -6.0 dB | `02 00 01 FF C4` |
+| Channel 2 to +3.5 dB | `02 02 01 00 23` |
+| Channel 1 off | `02 01 01 80 00` |
+| Channel 4 muted | `02 04 02 00 01` |
+| INFO: version 2, 4 inputs, 1 output | `83 02 04 01` |
+| METERS for those five: channel 0 clipping, channel 1 at -6 dB, channel 2 at -60 dB, channel 3 silent, the output at -12.5 dB | `82 00 0C 78 FF 19` |
 
-A STATE from a four-input mixer with MIC 1 at -6.0 dB, MIC 2 at -10.5 dB, KEYS off, LAPTOP at +3.5 dB and muted, MASTER at 0.0 dB:
+The CHANNEL messages of a four-input, one-output mixer:
 
-    81 01 04
-    FF C4 00 05 4D 49 43 20 31          MIC 1    -6.0 dB
-    FF 97 00 05 4D 49 43 20 32          MIC 2   -10.5 dB
-    80 00 00 04 4B 45 59 53             KEYS     off
-    00 23 01 06 4C 41 50 54 4F 50       LAPTOP   +3.5 dB, muted
-    00 00 00 06 4D 41 53 54 45 52       MASTER    0.0 dB
+    84 00 FF C4 00 05 4D 49 43 20 31          channel 0, MIC 1, -6.0 dB
+    84 01 FF 97 00 05 4D 49 43 20 32          channel 1, MIC 2, -10.5 dB
+    84 02 80 00 00 04 4B 45 59 53             channel 2, KEYS, off
+    84 03 00 23 01 06 4C 41 50 54 4F 50       channel 3, LAPTOP, +3.5 dB, muted
+    84 04 00 00 00 06 4D 41 53 54 45 52       channel 4, MASTER (the output), 0.0 dB
 
 ## Trying it without a mixer
 
 - In the web app, "Try the controls without a mixer" runs a practice core inside the page. It is connected to nothing.
-- `tests/standin_core.py` is the same thing on the far side of a real serial line: `python3 tests/standin_core.py /dev/ttyUSB0`, with a USB serial adaptor wired to the Pi's header.
+- `tests/standin_core.py` is the same thing on the far side of a real serial line: `python3 tests/standin_core.py /dev/ttyUSB0`, with a USB serial adaptor wired to the Pi's header. Add two numbers to play a mixer of another size, such as `16 4` for 16 inputs and 4 outputs.

@@ -1,4 +1,5 @@
-// CampMixer web app: sign in with the PIN, then a fader, a mute button and a meter for each input and the master.
+// CampMixer web app: sign in with the PIN, then a fader, a mute button and a meter for every input and output
+// the mixer core says it has, however many that is.
 // The mixer's settings live in the mixer core. This page asks for changes and shows what the core reports back,
 // which is how every phone (and the front panel) stays in step.
 // Kept in its own file because the page's security rules (Content-Security-Policy) allow no script written
@@ -11,6 +12,15 @@
   var pending = null, loopTimer = null;            // the loopback test
   var link = { open: false, up: false };           // what the Pi says about its serial link
   var mixer = null, mixerSeen = 0, strips = [];    // what the mixer core last reported, and when
+  // Meters are only drawn for the strips on screen, which is what keeps a mixer with a hundred channels smooth on a phone.
+  var seen = !('IntersectionObserver' in window) ? null : new IntersectionObserver(function(entries){
+    entries.forEach(function(entry){
+      var strip = entry.target.campmixerStrip;
+      if (!strip) return;
+      strip.visible = entry.isIntersecting;
+      if (strip.visible) drawMeter(strip);
+    });
+  }, { rootMargin: '300px' });
   var practice = null, practiceTimer = null, meterTimer = null;
   var SEND_EVERY_MS = 40;                          // while a fader is being dragged: at most 25 changes a second
   var HOLD_MS = 400;                               // after letting go, ignore the core's echoes of the way there
@@ -143,10 +153,16 @@
     if (!mixer || mixer.version !== L.VERSION) return false;
     return practice ? true : link.up && Date.now() - mixerSeen < STALE_MS;
   }
-  function forgetMixer(){
+  function ready(strip){ return usable() && strip.known; }
+  function clearStrips(){
     strips.forEach(function(strip){ clearTimeout(strip.sendTimer); });
-    mixer = null; strips = [];
+    if (seen) seen.disconnect();
+    strips = [];
     $('strips').textContent = '';
+  }
+  function forgetMixer(){
+    clearStrips();
+    mixer = null;
   }
 
   function drawStrip(strip){
@@ -158,6 +174,7 @@
     strip.mute.setAttribute('aria-pressed', strip.muted ? 'true' : 'false');
     strip.mute.textContent = strip.muted ? 'Muted' : 'Mute';
     strip.element.classList.toggle('muted', strip.muted);
+    strip.element.classList.toggle('unknown', !strip.known);
   }
   function drawMeter(strip){
     // An input's meter shows what is coming in on it, fader down and muted or not: that is how to see a
@@ -185,10 +202,13 @@
     strip.levelHold = Date.now() + HOLD_MS;
   }
 
-  function buildStrip(channel, number){
-    var strip = { channel: number, level: channel.level, muted: channel.muted, name: channel.name, peak: -Infinity,
-                  sent: channel.level, sentAt: 0, sendTimer: null, drag: null, levelHold: 0, muteHold: 0 };
-    var element = make('div', 'strip' + (channel.master ? ' master' : ''));
+  function buildStrip(number, label){
+    // Made as soon as the core says how many channels there are. It stays greyed until the core has said
+    // where that channel stands.
+    var strip = { channel: number, level: L.OFF, muted: false, name: label, known: false, visible: !seen, peak: -Infinity,
+                  sent: L.OFF, sentAt: 0, sendTimer: null, drag: null, levelHold: 0, muteHold: 0 };
+    var channel = { name: label };
+    var element = make('div', 'strip');
     var head = make('div', 'strip-head');
     var name = make('span', 'strip-name', channel.name);
     var down = make('button', 'step', '−'), up = make('button', 'step', '+');
@@ -220,11 +240,13 @@
     [head, row].forEach(function(part){ element.appendChild(part); });
     strip.element = element; strip.label = name; strip.readout = readout; strip.mute = mute;
     strip.fader = fader; strip.cover = cover; strip.down = down; strip.up = up;
+    element.campmixerStrip = strip;
+    if (seen) seen.observe(element);
 
     // Dragging is relative: the fader moves by as far as the finger moves, from where it was. Touching the
     // track does not make it jump there, because a jump in level is the last thing wanted in front of a crowd.
     fader.addEventListener('pointerdown', function(event){
-      if (!usable() || event.button > 0 || strip.drag) return;
+      if (!ready(strip) || event.button > 0 || strip.drag) return;
       strip.drag = { id: event.pointerId, x: event.clientX, from: L.positionOf(strip.level), was: strip.level,
                      width: Math.max(1, fader.clientWidth - 30), armed: false };
       try { fader.setPointerCapture(event.pointerId); } catch (e) { /* older browsers */ }
@@ -253,14 +275,14 @@
     fader.addEventListener('pointercancel', endDrag);
     fader.addEventListener('keydown', function(event){
       var steps = { ArrowLeft: -1, ArrowDown: -1, ArrowRight: 1, ArrowUp: 1, PageDown: -6, PageUp: 6 }[event.key];
-      if (!usable() || (!steps && event.key !== 'Home')) return;
+      if (!ready(strip) || (!steps && event.key !== 'Home')) return;
       event.preventDefault();
       setLevel(strip, event.key === 'Home' ? L.OFF : L.nudge(strip.level, steps));
       settle(strip);
     });
     function step(by){
       return function(){
-        if (!usable()) return;
+        if (!ready(strip)) return;
         setLevel(strip, L.nudge(strip.level, by));
         settle(strip);
       };
@@ -268,7 +290,7 @@
     down.addEventListener('click', step(-1));
     up.addEventListener('click', step(1));
     mute.addEventListener('click', function(){
-      if (!usable()) return;
+      if (!ready(strip)) return;
       strip.muted = !strip.muted;
       strip.muteHold = Date.now() + HOLD_MS;
       drawStrip(strip); drawMeter(strip);
@@ -278,39 +300,50 @@
     return strip;
   }
 
-  function onState(state){
-    mixer = state; mixerSeen = Date.now();
-    if (state.version !== L.VERSION){ strips = []; $('strips').textContent = ''; drawAvailability(); return; }
-    if (strips.length !== state.channels.length){
-      strips.forEach(function(strip){ clearTimeout(strip.sendTimer); });
-      strips = state.channels.map(buildStrip);
-      $('strips').textContent = '';
-      strips.forEach(function(strip){ $('strips').appendChild(strip.element); });
+  function onInfo(info){
+    // The core's heartbeat: its version and how many inputs and outputs it has.
+    var changed = !mixer || mixer.version !== info.version || mixer.inputs !== info.inputs || mixer.outputs !== info.outputs;
+    mixer = info; mixerSeen = Date.now();
+    if (changed){
+      clearStrips();
+      if (info.version === L.VERSION){
+        var box = $('strips'), n;
+        box.appendChild(make('h2', 'group', info.inputs === 1 ? 'Input' : 'Inputs'));
+        for (n = 0; n < info.inputs; n++) strips.push(buildStrip(n, 'Input ' + (n + 1)));
+        strips.forEach(function(strip){ box.appendChild(strip.element); });
+        box.appendChild(make('h2', 'group', info.outputs === 1 ? 'Output' : 'Outputs'));
+        for (n = 0; n < info.outputs; n++){
+          strips.push(buildStrip(info.inputs + n, info.outputs === 1 ? 'Output' : 'Output ' + (n + 1)));
+          box.appendChild(strips[strips.length - 1].element);
+        }
+        send(L.getState());            // a different mixer than a moment ago: ask where everything stands
+      }
     }
-    var now = Date.now();
-    state.channels.forEach(function(channel, n){
-      var strip = strips[n];
-      if (channel.name !== strip.name){
-        strip.name = channel.name; strip.label.textContent = channel.name;
-        strip.fader.setAttribute('aria-label', channel.name + ' level');
-        strip.down.setAttribute('aria-label', channel.name + ' down half a dB');
-        strip.up.setAttribute('aria-label', channel.name + ' up half a dB');
-      }
-      // The core has the last word, except on a fader that a finger is on (or has only just left).
-      if (!strip.drag && !strip.sendTimer && now >= strip.levelHold){
-        strip.level = channel.level; strip.sent = channel.level;
-      }
-      if (now >= strip.muteHold) strip.muted = channel.muted;
-      drawStrip(strip); drawMeter(strip);
-    });
     drawAvailability();
+  }
+  function onChannel(update){
+    var strip = strips[update.channel], now = Date.now();
+    if (!strip) return;
+    if (update.name !== strip.name){
+      strip.name = update.name; strip.label.textContent = update.name;
+      strip.fader.setAttribute('aria-label', update.name + ' level');
+      strip.down.setAttribute('aria-label', update.name + ' down half a dB');
+      strip.up.setAttribute('aria-label', update.name + ' up half a dB');
+    }
+    // The core has the last word, except on a fader that a finger is on (or has only just left).
+    if (!strip.known || (!strip.drag && !strip.sendTimer && now >= strip.levelHold)){
+      strip.level = update.level; strip.sent = update.level;
+    }
+    if (!strip.known || now >= strip.muteHold) strip.muted = update.muted;
+    strip.known = true;
+    drawStrip(strip);
   }
   function onMeters(meters){
     clearTimeout(meterTimer);
     strips.forEach(function(strip, n){
       var peak = n < meters.peaks.length ? meters.peaks[n] : -Infinity;
       strip.peak = Math.max(peak, strip.peak - 1.5);       // rise at once, fall back gently
-      drawMeter(strip);
+      if (strip.visible) drawMeter(strip);
     });
     meterTimer = setTimeout(function(){                    // nothing for a while: the meters drop, not freeze
       strips.forEach(function(strip){ strip.peak = -Infinity; drawMeter(strip); });
@@ -319,7 +352,8 @@
   function fromCore(bytes){
     var message = L.decode(bytes);
     if (!message) return;
-    if (message.type === 'state') onState(message);
+    if (message.type === 'info') onInfo(message);
+    else if (message.type === 'channel') onChannel(message);
     else if (message.type === 'meters') onMeters(message);
   }
 
@@ -342,9 +376,15 @@
 
   function startPractice(){
     if (practice) return;
+    // The same number of inputs and outputs as the mixer that was last heard from, if there was one.
+    var shape = mixer && mixer.version === L.VERSION ? mixer : { inputs: 4, outputs: 1 }, beat = 0;
     forgetMixer();
-    practice = new L.PracticeCore(fromCore);
-    practiceTimer = setInterval(function(){ if (practice) practice.meters(); }, 50);
+    practice = new L.PracticeCore(fromCore, shape.inputs, shape.outputs);
+    practiceTimer = setInterval(function(){
+      if (!practice) return;
+      practice.meters();
+      if (++beat % 20 === 0) practice.heartbeat();
+    }, 50);
     send(L.getState());
     drawAvailability();
   }
@@ -404,7 +444,7 @@
     // A real mixer core has turned up while practising: stop pretending, so nobody mistakes one for the other.
     if (practice && report.up) leavePractice();
     // Ask the core for its settings when it appears, and again for as long as it has not answered.
-    if (!practice && report.up && (cameUp || !usable())) send(L.getState());
+    if (!practice && report.up && (cameUp || !usable() || strips.some(function(strip){ return !strip.known; }))) send(L.getState());
     drawAvailability();
   }
   function onFrame(bytes){

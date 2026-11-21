@@ -47,11 +47,13 @@ summary{cursor:pointer;font-weight:600;min-height:28px}
 .banner{background:var(--warn-bg);color:var(--warn);border-radius:14px;padding:14px 16px;display:flex;flex-direction:column;gap:10px}
 .banner button.quiet{color:var(--warn);border-color:currentColor}
 
-/* ----- the mixer: one strip for each input, then the master ----- */
+/* ----- the mixer: a strip for each input, then one for each output, however many the mixer core has ----- */
+.group{margin:18px 0 0;padding-bottom:6px;border-bottom:3px solid var(--ink);font-size:13px;letter-spacing:.08em;text-transform:uppercase}
+.group:first-child{margin-top:0}
 .strip{display:flex;flex-direction:column;gap:4px;padding:10px 0;border-top:1px solid var(--line)}
-.strip:first-child{border-top:0;padding-top:0}
+.group + .strip{border-top:0}
 .strip:last-child{padding-bottom:0}
-.strip.master{border-top:3px solid var(--ink)}
+.strip.unknown{opacity:.4;pointer-events:none}
 .strip-head{display:flex;align-items:center;gap:8px}
 .strip-row{display:flex;align-items:center;gap:8px}
 .strip-middle{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}

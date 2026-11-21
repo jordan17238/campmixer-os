@@ -1,14 +1,16 @@
-// CampMixer: the messages the app and the mixer core exchange (PROTOCOL.md, layer 2, version 1),
+// CampMixer: the messages the app and the mixer core exchange (PROTOCOL.md, layer 2, version 2),
 // the fader's scale, and a practice core that lives in the page for trying the controls with no mixer.
+// The mixer core says how many inputs and outputs it has; nothing here assumes a number.
 // No page, no network: plain functions, so the same file is checked with Node (tests/test_mixer_link.js).
 (function(root){
   'use strict';
 
-  var VERSION = 1;
-  var GET_STATE = 0x01, SET = 0x02, STATE = 0x81, METERS = 0x82;
+  var VERSION = 2;
+  var GET_STATE = 0x01, SET = 0x02, METERS = 0x82, INFO = 0x83, CHANNEL = 0x84;
   var LEVEL = 1, MUTE = 2;
   var OFF = -32768;               // a level of "no sound at all"
   var LEVEL_MIN = -600, LEVEL_MAX = 100, STEP = 5;   // tenths of a dB: -60.0 to +10.0, in half-dB steps
+  var MAX_CHANNELS = 250;         // inputs and outputs together: a channel's number has to fit in one byte
 
   // ----- messages -----
 
@@ -31,26 +33,22 @@
   // What a message from the core says, or null if it is not one this app understands (those are ignored).
   function decode(bytes){
     if (!bytes || !bytes.length) return null;
-    var view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    if (bytes[0] === STATE){
-      if (bytes.length < 3) return null;
-      var state = { type: 'state', version: bytes[1], inputs: bytes[2], channels: [] };
-      if (state.version !== VERSION) return state;          // a newer core: say so, do not guess at its layout
-      if (state.inputs < 1 || state.inputs > 16) return null;
-      var at = 3;
-      for (var n = 0; n <= state.inputs; n++){
-        if (at + 4 > bytes.length) return null;
-        var size = bytes[at + 3];
-        if (size > 16 || at + 4 + size > bytes.length) return null;
-        state.channels.push({
-          level: view.getInt16(at),
-          muted: (bytes[at + 2] & 1) === 1,
-          name: utf8(bytes.subarray(at + 4, at + 4 + size)),
-          master: n === state.inputs
-        });
-        at += 4 + size;
-      }
-      return state;
+    if (bytes[0] === INFO){
+      if (bytes.length < 2) return null;
+      if (bytes[1] !== VERSION) return { type: 'info', version: bytes[1], inputs: 0, outputs: 0 };   // say so, do not guess
+      if (bytes.length < 4 || bytes[2] < 1 || bytes[3] < 1 || bytes[2] + bytes[3] > MAX_CHANNELS) return null;
+      return { type: 'info', version: VERSION, inputs: bytes[2], outputs: bytes[3] };
+    }
+    if (bytes[0] === CHANNEL){
+      if (bytes.length < 6) return null;
+      var size = bytes[5];
+      if (size > 16 || bytes.length < 6 + size) return null;
+      return {
+        type: 'channel', channel: bytes[1],
+        level: new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getInt16(2),
+        muted: (bytes[4] & 1) === 1,
+        name: utf8(bytes.subarray(6, 6 + size))
+      };
     }
     if (bytes[0] === METERS){
       var peaks = [];
@@ -114,27 +112,34 @@
 
   // ----- a practice core -----
   // Answers the same messages the real mixer core does, so the controls can be tried with no mixer connected.
-  // It lives in the page and is connected to nothing: no sound anywhere changes.
-  function PracticeCore(deliver){
+  // It lives in the page and is connected to nothing: no sound anywhere changes. Any number of inputs and outputs.
+  function PracticeCore(deliver, inputs, outputs){
     this.deliver = deliver;            // called with each message the core "sends"
-    this.channels = [
-      { level: -60, muted: false, name: 'MIC 1' }, { level: -100, muted: false, name: 'MIC 2' },
-      { level: OFF, muted: false, name: 'KEYS' }, { level: -120, muted: true, name: 'LAPTOP' },
-      { level: 0, muted: false, name: 'MASTER' }
-    ];
+    this.inputs = Math.max(1, Math.min(MAX_CHANNELS - 1, inputs || 4));
+    this.outputs = Math.max(1, Math.min(MAX_CHANNELS - this.inputs, outputs || 1));
+    this.channels = [];
+    var usual = [['MIC 1', -60], ['MIC 2', -100], ['KEYS', OFF], ['LAPTOP', -120]];
+    for (var n = 0; n < this.inputs; n++){
+      if (this.inputs === 4) this.channels.push({ level: usual[n][1], muted: n === 3, name: usual[n][0] });
+      else this.channels.push({ level: n % 5 === 4 ? OFF : -30 * (n % 4) - 30, muted: n % 7 === 6, name: 'IN ' + (n + 1) });
+    }
+    for (var m = 0; m < this.outputs; m++){
+      this.channels.push({ level: m ? -60 : 0, muted: false, name: this.outputs === 1 ? 'MASTER' : m ? 'OUT ' + (m + 1) : 'MAIN' });
+    }
     this.phase = 0;
   }
-  PracticeCore.prototype.state = function(){
-    var parts = [STATE, VERSION, this.channels.length - 1];
-    this.channels.forEach(function(channel){
-      var level = channel.level & 0xFFFF;
-      parts.push(level >> 8, level & 0xFF, channel.muted ? 1 : 0, channel.name.length);
-      for (var i = 0; i < channel.name.length; i++) parts.push(channel.name.charCodeAt(i) & 0x7F);
-    });
+  PracticeCore.prototype.info = function(){ return new Uint8Array([INFO, VERSION, this.inputs, this.outputs]); };
+  PracticeCore.prototype.channel = function(n){
+    var channel = this.channels[n], level = channel.level & 0xFFFF;
+    var parts = [CHANNEL, n, level >> 8, level & 0xFF, channel.muted ? 1 : 0, channel.name.length];
+    for (var i = 0; i < channel.name.length; i++) parts.push(channel.name.charCodeAt(i) & 0x7F);
     return new Uint8Array(parts);
   };
   PracticeCore.prototype.receive = function(bytes){
-    if (bytes[0] === GET_STATE) this.deliver(this.state());
+    if (bytes[0] === GET_STATE){
+      this.deliver(this.info());
+      for (var n = 0; n < this.channels.length; n++) this.deliver(this.channel(n));
+    }
     if (bytes[0] !== SET || bytes.length < 5) return;
     var channel = this.channels[bytes[1]];
     if (!channel) return;
@@ -142,29 +147,30 @@
     if (bytes[2] === LEVEL) channel.level = clampLevel(value);
     else if (bytes[2] === MUTE) channel.muted = value !== 0;
     else return;
-    this.deliver(this.state());
+    this.deliver(this.channel(bytes[1]));
   };
   PracticeCore.prototype.meters = function(){   // call 20 times a second: something lifelike to look at
     this.phase += 1;
-    var bytes = [METERS], loudest = -Infinity, master = this.channels[this.channels.length - 1], phase = this.phase;
+    var bytes = [METERS], loudest = -Infinity, phase = this.phase, inputs = this.inputs;
     this.channels.forEach(function(channel, n){
       var peak;
-      if (channel === master){
-        // What goes out to the speaker: the loudest input that is up and not muted, through the master.
-        peak = master.muted || master.level === OFF ? -Infinity : loudest + master.level / 10;
+      if (n >= inputs){
+        // What goes out of that output: the loudest input that is up and not muted, through the output's own fader.
+        peak = channel.muted || channel.level === OFF ? -Infinity : loudest + channel.level / 10;
       } else {
         // What comes in on that input, whatever its fader and mute are doing.
-        peak = -18 + 9 * Math.sin(phase / (7 + 3 * n)) + 5 * Math.sin(phase / (1.7 + n));
+        peak = -18 + 9 * Math.sin(phase / (7 + 3 * (n % 9))) + 5 * Math.sin(phase / (1.7 + n % 5));
         if (!channel.muted && channel.level !== OFF) loudest = Math.max(loudest, peak + channel.level / 10);
       }
       bytes.push(peak > -127 ? Math.max(0, Math.min(254, Math.round(-peak * 2))) : 255);
     });
     this.deliver(new Uint8Array(bytes));
   };
+  PracticeCore.prototype.heartbeat = function(){ this.deliver(this.info()); };   // call once a second, as the real core does
 
   var api = {
-    VERSION: VERSION, GET_STATE: GET_STATE, SET: SET, STATE: STATE, METERS: METERS, LEVEL: LEVEL, MUTE: MUTE,
-    OFF: OFF, LEVEL_MIN: LEVEL_MIN, LEVEL_MAX: LEVEL_MAX, STEP: STEP,
+    VERSION: VERSION, GET_STATE: GET_STATE, SET: SET, METERS: METERS, INFO: INFO, CHANNEL: CHANNEL, LEVEL: LEVEL, MUTE: MUTE,
+    OFF: OFF, LEVEL_MIN: LEVEL_MIN, LEVEL_MAX: LEVEL_MAX, STEP: STEP, MAX_CHANNELS: MAX_CHANNELS,
     getState: getState, set: set, decode: decode, clampLevel: clampLevel, levelAt: levelAt, positionOf: positionOf,
     nudge: nudge, levelText: levelText, meterWidth: meterWidth, PracticeCore: PracticeCore
   };

@@ -31,8 +31,8 @@ async function until(what, test, ms = 6000) {
   }
 }
 
-function startServer() {
-  const server = spawn('python3', [path.join(__dirname, 'ui_server.py'), '18095'], { stdio: ['pipe', 'pipe', 'inherit'] });
+function startServer(port = '18095', ...shape) {
+  const server = spawn('python3', [path.join(__dirname, 'ui_server.py'), port, ...shape], { stdio: ['pipe', 'pipe', 'inherit'] });
   const lines = [];
   let waiting = [];
   server.stdout.setEncoding('utf8');
@@ -224,7 +224,7 @@ async function signIn(page, pin) {
     await phone.evaluate(() => document.querySelectorAll('#strips .strip')[1].querySelectorAll('.step')[0].click());
     await phone.evaluate(() => document.querySelectorAll('#strips .strip')[1].querySelectorAll('.step')[0].click());
     assert.strictEqual((await strip(phone, 1)).level, '−10.5 dB');
-    await phone.focus('#strips .strip:nth-child(2) .fader');
+    await phone.evaluate(() => document.querySelectorAll('#strips .fader')[1].focus());
     await phone.keyboard.press('ArrowRight');
     assert.strictEqual((await strip(phone, 1)).level, '−10.0 dB');
     await phone.keyboard.press('PageDown');
@@ -330,6 +330,40 @@ async function signIn(page, pin) {
       await until('the wait', async () => /Try again in \d+ s/.test(await text(phone, '#pin-message')));
       assert.ok(await phone.evaluate(() => document.querySelector('#sign-in-button').disabled));
       await shot(phone, '10-wait');
+    }
+    if (server) {
+      // --- a big mixer: 32 inputs and 6 outputs, on the same page with nothing changed but what the core says it has
+      const bigServer = startServer('18097', '32', '6');
+      const bigReady = (await bigServer.line('READY')).split(' ');
+      try {
+        const bigContext = await browser.createBrowserContext();
+        const big = await newPhone(bigContext);
+        await big.goto(bigReady[1], { waitUntil: 'networkidle0' });
+        await signIn(big, bigReady[3]);
+        await until('38 strips', async () => (await big.evaluate(() => document.querySelectorAll('#strips .strip').length)) === 38);
+        await until('every strip to be filled in', async () => (await big.evaluate(() => document.querySelectorAll('#strips .strip.unknown').length)) === 0);
+        assert.deepStrictEqual(await big.evaluate(() => Array.from(document.querySelectorAll('#strips .group')).map(h => h.textContent)), ['Inputs', 'Outputs']);
+        assert.deepStrictEqual([(await strip(big, 0)).name, (await strip(big, 31)).name, (await strip(big, 32)).name, (await strip(big, 37)).name], ['IN 1', 'IN 32', 'MAIN', 'OUT 6']);
+        assert.ok(await big.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), 'the big mixer is wider than the phone');
+        await sleep(400);
+        await big.screenshot({ path: path.join(SHOTS, '11-big-mixer-top.png') });
+        const lastBox = await faderBox(big, 37);                         // the last output, right at the bottom
+        const lastBefore = await strip(big, 37);
+        await drag(big, lastBox.thumb, lastBox.y, -50);
+        const lastAfter = await strip(big, 37);
+        assert.ok(lastAfter.p < lastBefore.p - 0.1, 'the last output did not move: ' + JSON.stringify([lastBefore, lastAfter]));
+        await bigServer.line('SET OUT 6');
+        await big.evaluate(() => document.querySelectorAll('#strips .mute')[20].click());   // and an input in the middle
+        await bigServer.line('SET IN 21');
+        await until('meters moving at the bottom', async () => (await strip(big, 37)).meter < 100);
+        await sleep(300);
+        await big.screenshot({ path: path.join(SHOTS, '12-big-mixer-outputs.png') });
+        // Strips far off screen are not being redrawn; the one on screen is.
+        const drawn = await big.evaluate(() => Array.from(document.querySelectorAll('#strips .strip')).map(el => el.campmixerStrip.visible));
+        assert.ok(drawn[37] && !drawn[0], 'meters are drawn for strips that are off screen: ' + JSON.stringify(drawn));
+      } finally {
+        bigServer.stop();
+      }
     }
     assert.deepStrictEqual(problems, [], 'the browser reported problems');
     console.log('web app in a real browser: all checks passed (pictures in ' + SHOTS + ')');

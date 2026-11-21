@@ -1,4 +1,4 @@
-# CampMixer OS 0.3.1
+# CampMixer OS 0.4.0
 
 Its own operating system for the Camp PA Mixer's Raspberry Pi, built on Raspberry Pi OS Lite (64-bit).
 You write one image to a microSD card and the Pi starts up as the mixer's remote. There is no install step.
@@ -7,7 +7,7 @@ This folder is the source for that image.
 
 ## What the OS does
 
-- **Web app at http://mixer.local, behind a PIN.** A fader, a mute button and a level meter for each input and for the master. See *The web app* and *Who can reach it* below.
+- **Web app at http://mixer.local, behind a PIN.** A fader, a mute button and a level meter for every input and every output the mixer has, however many that is. See *The web app* and *Who can reach it* below.
 - **Wi-Fi.** It joins a network you have listed when that network is in range, so the mixer sits on the venue's LAN. Otherwise it makes its own network, `CampMixer`.
 - **Ethernet.** Plug it into any network and it takes an address. A cable straight to a laptop works too, within a few seconds, on a 169.254 address. It keeps asking for a proper address in the background, so a router that starts up after the mixer is still picked up without touching the cable.
 - **SSH** is on: `ssh mixer@mixer.local`.
@@ -80,16 +80,18 @@ There is no built-in Wi-Fi password and no built-in PIN. If `WIFI_PASSWORD` is b
 
 Open http://mixer.local on a phone or a laptop on the same network and type the PIN. Each phone is asked once and stays signed in, through restarts, until the PIN is changed.
 
-Each input, and the master, has:
+**Any number of inputs and outputs.** The mixer core tells the Pi how many it has, and the page shows a strip for each: the inputs first, then the outputs. Nothing on the Pi is set up for a particular mixer, so the same card drives the four-input, one-output Camp PA Mixer or a much bigger one (up to 250 inputs and outputs together; `PROTOCOL.md` has what the serial link carries).
+
+Every input and every output has:
 
 - **A fader.** Drag it sideways. It moves by as far as your finger moves, from where it was: touching the track does not make it jump, and scrolling the page past it moves nothing. The mark three quarters of the way along is 0 dB. All the way left is off.
 - **− and +** for half a decibel at a time.
 - **Mute.** The button turns red and reads *Muted*.
-- **A meter.** An input's meter shows what is coming in on it, fader down and muted or not, so a microphone can be seen to be alive before it is brought up. The master's shows what is going out.
+- **A meter.** An input's meter shows what is coming in on it, fader down and muted or not, so a microphone can be seen to be alive before it is brought up. An output's shows what is going out of it.
 
 The settings live in the mixer core, not in the phone or the Pi. A change made on one phone shows on every other phone as the core confirms it, and so will a turn of a knob on the front panel.
 
-When the mixer core cannot be reached the controls go grey and the page says why. From there **Try the controls without a mixer** runs a practice mixer inside the page. It is marked as practice, is connected to nothing, and ends by itself the moment a real mixer core appears.
+When the mixer core cannot be reached the controls go grey and the page says why. From there **Try the controls without a mixer** runs a practice mixer inside the page, the same size as the mixer that was last connected. It is marked as practice, is connected to nothing, and ends by itself the moment a real mixer core appears.
 
 Not in yet: gain, 48 V, ground lift, high-pass, feedback filter, names and scenes (the front panel's menus).
 
@@ -158,8 +160,8 @@ Reading does not wear a card. The Pi reads the system from the card once at star
 
 Build 4 (0.3.0) has no `update` command yet. To update from it, after the unlock and restart:
 
-    curl -fsSL https://github.com/jordan17238/campmixer-os/archive/refs/tags/v0.3.1-build5.tar.gz | tar xz -C /tmp
-    sudo bash /tmp/campmixer-os-0.3.1-build5/install.sh
+    curl -fsSL https://github.com/jordan17238/campmixer-os/archive/refs/tags/v0.4.0-build6.tar.gz | tar xz -C /tmp
+    sudo bash /tmp/campmixer-os-0.4.0-build6/install.sh
     sudo reboot
 
 Or write the newer image to the card, as for a new one. Copy `campmixer.txt` off the card first and put it back afterwards to keep your settings.
@@ -204,7 +206,7 @@ The framing on that link, and the messages for volume, mute and meters that the 
 
 - Signing in: which PINs are allowed, the hash, the cookies (forged, altered, cut short, signed by another mixer with the same PIN), and the guess limit on a clock the test moves by hand, including the most anyone can get through in a day.
 - The bridge, end to end, against a pretend serial port and a standard WebSocket client, from an address that counts as "the network": nothing without the PIN, the PIN refused when another site's page sends it, the wait after five wrong PINs, a restart that neither clears the count nor signs anyone out, a PIN change that signs everyone out, a missing or damaged sign-in file letting nobody in, sixty idle connections from one address, 400 malformed requests. Also both directions of the link, damaged frames, oversize messages, which host names it answers to, the serial port vanishing.
-- Volume, mute and meters, end to end: two signed-in phones, the real bridge, and the stand-in mixer core on the far side of a pretend serial port. The message examples in `PROTOCOL.md` are checked against both the web app's own code (run with Node) and the stand-in core.
+- Volume, mute and meters, end to end: signed-in phones, the real bridge, and the stand-in mixer core on the far side of a pretend serial port, as a mixer with 4 inputs and 1 output, 1 and 1, 48 and 8, and 200 and 50. The message examples in `PROTOCOL.md` are checked against both the web app's own code (run with Node) and the stand-in core.
 - The framing, against the published COBS examples and the CRC check value.
 - Every generated network profile, read back by NetworkManager 1.46's own parser, including awkward names and passwords.
 - The radio's decisions against a scripted stand-in for NetworkManager: start-up, slow joins, looking again when idle, refused networks, drop-outs.
@@ -213,7 +215,7 @@ The framing on that link, and the messages for volume, mute and meters that the 
 - The installer's edits, against the stock Raspberry Pi OS `config.txt` and `cmdline.txt`, for both an image build and a running Pi, and that an image carries no password, PIN or key.
 - The two start-up pieces that follow the lock.
 
-**The web app in a real browser.** `tests/ui_check.js` drives headless Chrome at phone size with touch (it needs Chrome, so it is run by hand, not on GitHub): signing in, a cookie the page's own script cannot read, dragging the faders, a touch on the track and a scroll past a fader both changing nothing, the half-dB buttons, the keyboard, mute, a second phone following the first, a laptop with a mouse, dark mode, the mixer core going away, practice mode, the core coming back, a PIN change signing both phones out, and the wait after wrong PINs. No errors from the browser and nothing blocked by the page's own security rules.
+**The web app in a real browser.** `tests/ui_check.js` drives headless Chrome at phone size with touch (it needs Chrome, so it is run by hand, not on GitHub): signing in, a cookie the page's own script cannot read, dragging the faders, a touch on the track and a scroll past a fader both changing nothing, the half-dB buttons, the keyboard, mute, a second phone following the first, a laptop with a mouse, dark mode, the mixer core going away, practice mode, the core coming back, a PIN change signing both phones out, the wait after wrong PINs, and a mixer with 32 inputs and 6 outputs (every strip there, the last output dragged at the bottom of the page, meters of off-screen strips left alone). No errors from the browser and nothing blocked by the page's own security rules.
 
 **The image itself, started in an emulator.** `CampMixerOS-0.3.0-build4` was downloaded from Releases and started in QEMU as a Raspberry Pi 3B (QEMU has no Pi 4 model; the same image starts on both). The image's own `disable-bt` overlay was applied to the emulated board so the serial port came up as it does on the Pi, and the stand-in mixer core was connected to that serial port.
 
@@ -225,7 +227,14 @@ The framing on that link, and the messages for volume, mute and meters that the 
 - The real page from the real image in headless Chrome at phone size: sign-in, the faders moving the stand-in core through the emulated serial port and a second phone following, mute, a laptop, the core unplugged, practice mode, the core back, and a PIN change from the command line signing the phone out.
 - With simulated Wi-Fi radios (the Pi kernel includes them): the mixer's own network came up with the made-up password, a simulated phone joined with WPA2, got an address, resolved `mixer.local`, `mixer.lan` and `mixer`, got the sign-in page and nothing else, and signed in with the PIN.
 
-On builds 2 and 3, and not run again on build 4 because that code has not changed:
+**Since build 4** (versions 0.3.1 and 0.4.0), in the same emulator:
+
+- Updating in place: build 4, unlocked, was updated to 0.3.1 with the `update` command's own code (the download itself came from a file, since the emulator has no internet), restarted locked as 0.3.1 with its settings, PIN and login intact, and then took a 4-digit PIN with the stricter guess limit in force.
+- Any number of inputs and outputs: the 0.4.0 page and bridge were loaded onto that running system and driven from headless Chrome with a stand-in mixer of 48 inputs and 8 outputs on the emulated serial port. All 56 strips were filled in under a second after signing in, the last output was dragged at the bottom of the page and the change reached the core, and over ten seconds 412 messages arrived with none damaged or dropped.
+- The images of builds 5 and 6 themselves were not started. Their files are the ones tested above.
+- The serial-link loads in `PROTOCOL.md` are worked out from the message sizes, not measured: the emulated port does not hold data back to 115200 baud.
+
+On builds 2 and 3, and not run again since because that code has not changed:
 
 - Unlock, an unlocked start, lock again, and a first start cut short at its last moment finishing itself.
 - Joining a listed network, the mixer's own network back 30 s after the listed one vanished, rejoining when it returned; a phone on the mixer's own network keeping the radio from leaving it; a listed network with the wrong password; the radio-choice rules.

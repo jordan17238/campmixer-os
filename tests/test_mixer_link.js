@@ -15,29 +15,30 @@ assert.strictEqual(hex(L.getState()), vectors.to_core[0].hex);
 for (const v of vectors.to_core.slice(1)) assert.strictEqual(hex(L.set(v.channel, v.set, v.value)), v.hex, v.what);
 
 // --- what the app understands
-const state = L.decode(unhex(vectors.state.hex));
-assert.strictEqual(state.type, 'state');
-assert.strictEqual(state.version, 1);
-assert.strictEqual(state.inputs, vectors.state.inputs);
-assert.deepStrictEqual(state.channels.map(c => ({ level: c.level, muted: c.muted, name: c.name })), vectors.state.channels);
-assert.deepStrictEqual(state.channels.map(c => c.master), [false, false, false, false, true]);
+assert.deepStrictEqual(L.decode(unhex(vectors.info.hex)), { type: 'info', version: 2, inputs: 4, outputs: 1 });
+for (const v of vectors.channels) {
+  assert.deepStrictEqual(L.decode(unhex(v.hex)), { type: 'channel', channel: v.channel, level: v.level, muted: v.muted, name: v.name }, v.name);
+}
 const meters = L.decode(unhex(vectors.meters.hex));
 assert.deepStrictEqual(meters, { type: 'meters', peaks: vectors.meters.peaks.map(p => p === null ? -Infinity : p) });
 // A slice of a larger buffer (how a browser may hand it over) reads the same.
-const padded = new Uint8Array([9, 9, 9, ...unhex(vectors.state.hex), 9]);
-assert.deepStrictEqual(L.decode(padded.subarray(3, padded.length - 1)), state);
+const one = unhex(vectors.channels[3].hex);
+const padded = new Uint8Array([9, 9, 9, ...one, 9]);
+assert.deepStrictEqual(L.decode(padded.subarray(3, padded.length - 1)), L.decode(one));
 // A name in another script arrives whole.
-const named = L.decode(new Uint8Array([0x81, 1, 1, 0, 0, 0, 5, 0x43, 0x61, 0x66, 0xC3, 0xA9, 0, 0, 0, 1, 0x4D]));
-assert.deepStrictEqual(named.channels.map(c => c.name), ['Café', 'M']);
+assert.strictEqual(L.decode(new Uint8Array([0x84, 7, 0, 0, 0, 5, 0x43, 0x61, 0x66, 0xC3, 0xA9])).name, 'Café');
+// Any number of inputs and outputs, up to what a one-byte channel number allows.
+assert.deepStrictEqual(L.decode(new Uint8Array([0x83, 2, 1, 1])), { type: 'info', version: 2, inputs: 1, outputs: 1 });
+assert.deepStrictEqual(L.decode(new Uint8Array([0x83, 2, 200, 50])), { type: 'info', version: 2, inputs: 200, outputs: 50 });
+assert.deepStrictEqual(L.decode(new Uint8Array([0x83, 2, 48, 16])), { type: 'info', version: 2, inputs: 48, outputs: 16 });
+for (const bad of [[0x83, 2, 0, 1], [0x83, 2, 1, 0], [0x83, 2, 200, 51], [0x83, 2, 255, 255], [0x83, 2, 4], [0x83, 2], [0x83]]) {
+  assert.strictEqual(L.decode(new Uint8Array(bad)), null, JSON.stringify(bad));
+}
+assert.strictEqual(L.decode(new Uint8Array([0x84, 249, 0xFF, 0xC4, 1, 0])).channel, 249);
 
 // Anything else is ignored, never guessed at and never an error.
-const whole = unhex(vectors.state.hex);
-for (let cut = 0; cut < whole.length; cut++){
-  const short = L.decode(whole.subarray(0, cut));
-  assert.ok(short === null, 'a STATE cut to ' + cut + ' bytes was accepted');
-}
-for (const junk of ['', '00', '01', '02', '7e0102', '80', '83', 'ff', '8101', '810100', '8101ff', '810111' + '00'.repeat(80),
-                    '81010100000011' + '41'.repeat(17) + '0000000000']) {
+for (let cut = 0; cut < one.length; cut++) assert.ok(L.decode(one.subarray(0, cut)) === null, 'a CHANNEL cut to ' + cut + ' bytes was accepted');
+for (const junk of ['', '00', '01', '02', '7e0102', '80', '81', '810104', '85', 'ff', '8400000000' + '11' + '41'.repeat(17), '840000000005414243']) {
   assert.strictEqual(L.decode(unhex(junk)), null, junk);
 }
 assert.strictEqual(L.decode(null), null);
@@ -45,19 +46,16 @@ assert.strictEqual(L.decode(undefined), null);
 let rng = 12345;
 const random = () => (rng = (rng * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
 for (let n = 0; n < 20000; n++){
-  const bytes = new Uint8Array(Math.floor(random() * 70));
+  const bytes = new Uint8Array(Math.floor(random() * 40));
   for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(random() * 256);
-  if (random() < 0.7 && bytes.length) bytes[0] = random() < 0.5 ? 0x81 : 0x82;
-  if (random() < 0.5 && bytes.length > 2) { bytes[1] = 1; bytes[2] = 1 + Math.floor(random() * 5); }
+  if (random() < 0.8 && bytes.length) bytes[0] = [0x82, 0x83, 0x84][Math.floor(random() * 3)];
+  if (random() < 0.5 && bytes.length > 1 && bytes[0] === 0x83) bytes[1] = 2;
   const got = L.decode(bytes);                       // must not throw, whatever arrives
-  if (got && got.type === 'state' && got.version === 1) {
-    assert.strictEqual(got.channels.length, got.inputs + 1);
-    for (const c of got.channels) assert.ok(typeof c.name === 'string' && Number.isInteger(c.level));
-  }
+  if (got && got.type === 'info' && got.version === 2) assert.ok(got.inputs >= 1 && got.outputs >= 1 && got.inputs + got.outputs <= 250);
+  if (got && got.type === 'channel') assert.ok(typeof got.name === 'string' && Number.isInteger(got.level) && typeof got.muted === 'boolean');
 }
-// A core that speaks a later version is reported as such, with no attempt to read the rest.
-const newer = L.decode(new Uint8Array([0x81, 2, 4, 1, 2, 3]));
-assert.deepStrictEqual(newer, { type: 'state', version: 2, inputs: 4, channels: [] });
+// A core that speaks another version is reported as such, with no attempt to read the rest.
+assert.deepStrictEqual(L.decode(new Uint8Array([0x83, 3, 4, 1, 9, 9])), { type: 'info', version: 3, inputs: 0, outputs: 0 });
 
 // --- the fader's scale
 assert.strictEqual(L.levelAt(0), L.OFF);
@@ -121,19 +119,21 @@ assert.strictEqual(L.meterWidth(NaN), 0);
 const heard = [];
 const core = new L.PracticeCore(bytes => heard.push(L.decode(bytes)));
 core.receive(L.getState());
-assert.strictEqual(heard.length, 1);
-assert.strictEqual(heard[0].channels.length, 5);
-assert.strictEqual(heard[0].channels[4].name, 'MASTER');
+assert.deepStrictEqual(heard[0], { type: 'info', version: 2, inputs: 4, outputs: 1 });
+assert.strictEqual(heard.length, 6);
+assert.deepStrictEqual(heard.slice(1).map(m => [m.type, m.channel, m.name]),
+  [['channel', 0, 'MIC 1'], ['channel', 1, 'MIC 2'], ['channel', 2, 'KEYS'], ['channel', 3, 'LAPTOP'], ['channel', 4, 'MASTER']]);
+const latest = () => heard[heard.length - 1];
 core.receive(L.set(0, L.LEVEL, -35));
-assert.strictEqual(heard[1].channels[0].level, -35);
+assert.deepStrictEqual([heard.length, latest().channel, latest().level], [7, 0, -35]);   // one change, one answer: just that channel
 core.receive(L.set(0, L.LEVEL, 2000));
-assert.strictEqual(heard[2].channels[0].level, 100);
+assert.strictEqual(latest().level, 100);
 core.receive(L.set(1, L.LEVEL, -700));
-assert.strictEqual(heard[3].channels[1].level, L.OFF);
+assert.deepStrictEqual([latest().channel, latest().level], [1, L.OFF]);
 core.receive(L.set(4, L.MUTE, 1));
-assert.strictEqual(heard[4].channels[4].muted, true);
+assert.deepStrictEqual([latest().channel, latest().muted], [4, true]);
 core.receive(L.set(4, L.MUTE, 0));
-assert.strictEqual(heard[5].channels[4].muted, false);
+assert.strictEqual(latest().muted, false);
 const before = heard.length;
 core.receive(L.set(9, L.LEVEL, 0));                  // no such channel
 core.receive(L.set(0, 77, 0));                       // no such setting
@@ -141,21 +141,35 @@ core.receive(new Uint8Array([L.SET, 0, 1]));         // cut short
 core.receive(new Uint8Array([0x55]));
 assert.strictEqual(heard.length, before);
 core.receive(L.set(4, L.LEVEL, 0));
+heard.length = 0;
 for (let n = 0; n < 200; n++) core.meters();
-const shown = heard.filter(m => m.type === 'meters');
-assert.strictEqual(shown.length, 200);
-assert.ok(shown.every(m => m.peaks.length === 5 && m.peaks.every(p => p === -Infinity || (p <= 0 && p >= -127))));
-// An input's meter shows what is coming in, whatever its fader and mute are doing. The master's shows what goes out.
-assert.ok(shown.every(m => m.peaks.slice(0, 4).every(p => p > -60)), 'an input shows nothing on its meter');
-assert.ok(shown.some(m => m.peaks[4] > -40), 'the master never shows on its meter');
+// An input's meter shows what is coming in, whatever its fader and mute are doing. An output's shows what goes out.
+assert.ok(heard.every(m => m.type === 'meters' && m.peaks.length === 5 && m.peaks.every(p => p === -Infinity || (p <= 0 && p >= -127))));
+assert.ok(heard.every(m => m.peaks.slice(0, 4).every(p => p > -60)), 'an input shows nothing on its meter');
+assert.ok(heard.some(m => m.peaks[4] > -40), 'the output never shows on its meter');
 heard.length = 0;
 core.receive(L.set(4, L.MUTE, 1));
 for (let n = 0; n < 20; n++) core.meters();
-assert.ok(heard.filter(m => m.type === 'meters').every(m => m.peaks[4] === -Infinity && m.peaks[0] > -60), 'a muted master shows on its meter');
-core.receive(L.set(4, L.MUTE, 0));
-for (let n = 0; n < 4; n++) core.receive(L.set(n, L.LEVEL, L.OFF));
-heard.length = 0;
-for (let n = 0; n < 20; n++) core.meters();
-assert.ok(heard.every(m => m.peaks[4] === -Infinity), 'the master shows something with every input off');
+assert.ok(heard.filter(m => m.type === 'meters').every(m => m.peaks[4] === -Infinity && m.peaks[0] > -60), 'a muted output shows on its meter');
+core.heartbeat();
+assert.deepStrictEqual(latest(), { type: 'info', version: 2, inputs: 4, outputs: 1 });
+
+// A big one: 48 inputs and 8 outputs, and the most that fits.
+for (const [ins, outs] of [[48, 8], [1, 1], [200, 50], [16, 2]]) {
+  const said = [];
+  const big = new L.PracticeCore(bytes => said.push(L.decode(bytes)), ins, outs);
+  big.receive(L.getState());
+  assert.deepStrictEqual(said[0], { type: 'info', version: 2, inputs: ins, outputs: outs });
+  assert.strictEqual(said.length, 1 + ins + outs);
+  assert.deepStrictEqual(said.slice(1).map(m => m.channel), Array.from({ length: ins + outs }, (_, n) => n));
+  assert.ok(said.slice(1).every(m => m.name.length >= 1 && m.name.length <= 16));
+  big.receive(L.set(ins + outs - 1, L.LEVEL, -45));  // the last output
+  assert.deepStrictEqual([said[said.length - 1].channel, said[said.length - 1].level], [ins + outs - 1, -45]);
+  big.receive(L.set(ins + outs, L.LEVEL, 0));        // one past the end: nothing
+  assert.strictEqual(said.length, 2 + ins + outs);
+  said.length = 0;
+  big.meters();
+  assert.strictEqual(said[0].peaks.length, ins + outs);
+}
 
 console.log('mixer messages (web app): all checks passed');

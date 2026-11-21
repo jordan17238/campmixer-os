@@ -2,7 +2,7 @@
 """Runs the real bridge with a stand-in mixer core behind a pretend serial port, for looking at the web app
 in a browser on this computer, by hand or from tests/ui_check.js.
 
-    python3 tests/ui_server.py [port]
+    python3 tests/ui_server.py [port [inputs outputs]]      (4 inputs and 1 output unless told otherwise)
 
 Then open http://127.0.0.1:PORT and sign in with the PIN it prints. It takes these lines on its input:
 
@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 APP = os.path.join(HERE, "..", "rootfs", "opt", "campmixer")
@@ -28,6 +29,7 @@ import campmixer_auth  # noqa: E402
 import standin_core as sc  # noqa: E402
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 18095
+SHAPE = (int(sys.argv[2]), int(sys.argv[3])) if len(sys.argv) > 3 else (4, 1)
 PIN = "48271935"
 KEY = secrets.token_bytes(32)
 
@@ -46,9 +48,13 @@ def main():
     write_auth(PIN)
     bridge = subprocess.Popen([sys.executable, os.path.join(APP, "bridge.py"), "--port", str(PORT), "--bind", "127.0.0.1",
                                "--serial", os.ttyname(slave), "--auth", auth_file, "--state", os.path.join(work, "sign-in.json")])
-    core, quiet = sc.StandInCore(), threading.Event()
-    core.channels[0]["level"], core.channels[1]["level"], core.channels[2]["level"] = -60, -100, sc.OFF
-    core.channels[3].update(level=-120, muted=True)
+    core, quiet = sc.StandInCore(*SHAPE), threading.Event()
+    if SHAPE == (4, 1):
+        core.channels[0]["level"], core.channels[1]["level"], core.channels[2]["level"] = -60, -100, sc.OFF
+        core.channels[3].update(level=-120, muted=True)
+    else:
+        for number, channel in enumerate(core.channels[: SHAPE[0]]):
+            channel.update(level=sc.OFF if number % 5 == 4 else -30 * (number % 4) - 30, muted=number % 7 == 6)
 
     def report(channel, what):
         value = ("muted" if channel["muted"] else "unmuted") if what == sc.MUTE else str(channel["level"])
@@ -64,8 +70,11 @@ def main():
         return b"" if quiet.is_set() else data
 
     def write(data):
-        if not quiet.is_set():
-            os.write(master, data)
+        while data and not quiet.is_set():
+            try:
+                data = data[os.write(master, data):]
+            except BlockingIOError:
+                time.sleep(0.002)
 
     threading.Thread(target=core.serve, args=(read, write), daemon=True).start()
     print("READY http://127.0.0.1:%d PIN %s" % (PORT, PIN), flush=True)
