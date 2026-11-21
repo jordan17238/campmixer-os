@@ -20,6 +20,8 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
+# The settings file holds passwords. The part that talks to the network has no business reading it.
+InaccessiblePaths=-/boot/firmware
 
 [Install]
 WantedBy=multi-user.target

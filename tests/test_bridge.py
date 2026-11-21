@@ -24,6 +24,25 @@ from campmixer_link import FrameDecoder, encode_frame  # noqa: E402
 from websockets.asyncio.client import connect  # noqa: E402
 from websockets.exceptions import InvalidStatus  # noqa: E402
 
+import bridge  # noqa: E402
+
+
+def lock_state(mounts):
+    with tempfile.NamedTemporaryFile("w", suffix=".mounts", delete=False) as handle:
+        handle.write(mounts)
+    try:
+        return bridge.root_is_overlay(handle.name)
+    finally:
+        os.unlink(handle.name)
+
+
+# "Locked" is read from what is really mounted on /, not from what was asked for at start-up.
+assert lock_state("/dev/mmcblk0p2 / ext4 rw,noatime 0 0\n") is False
+assert lock_state("/dev/mmcblk0p2 /media/root-ro ext4 ro,relatime 0 0\n"
+                  "overlayroot / overlay rw,relatime,lowerdir=/media/root-ro,upperdir=/media/root-rw/overlay 0 0\n") is True
+assert lock_state("/dev/mmcblk0p2 / ext4 rw 0 0\noverlay /var/lib/x/merged overlay rw 0 0\n") is False
+assert lock_state("") is False and bridge.root_is_overlay("/nonexistent/mounts") is False
+
 PORT = 18080
 BASE = "http://127.0.0.1:%d" % PORT
 WS = "ws://127.0.0.1:%d/ws" % PORT

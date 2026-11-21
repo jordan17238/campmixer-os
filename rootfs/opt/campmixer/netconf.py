@@ -16,6 +16,7 @@ Python standard library only.
 import contextlib
 import os
 import re
+import secrets
 import subprocess
 import sys
 import time
@@ -30,6 +31,7 @@ NM_PROFILES = ROOT / "etc/NetworkManager/system-connections"
 NM_CONF = ROOT / "etc/NetworkManager/conf.d/90-campmixer.conf"
 NM_STATE = ROOT / "var/lib/NetworkManager/NetworkManager.state"
 SYS_NET = Path(os.environ.get("CAMPMIXER_SYS_NET", "/sys/class/net"))
+SYS_USB = Path(os.environ.get("CAMPMIXER_SYS_USB", str(ROOT / "sys/bus/usb/devices")))
 NMCLI = os.environ.get("CAMPMIXER_NMCLI", "nmcli")
 TIME_SCALE = float(os.environ.get("CAMPMIXER_TIME_SCALE", "1"))
 
@@ -40,7 +42,7 @@ ETH_DIRECT_PROFILE = "campmixer-eth-direct"
 JOIN_PREFIX = "campmixer-join-"
 JOIN_SLOTS = 4
 DEFAULT_NAME = "CampMixer"
-FALLBACK_PASSWORD = "campmixer-setup"
+PASSWORD_LETTERS = "abcdefghjkmnpqrstuvwxyz23456789"  # none that look alike
 ONBOARD_DRIVERS = ("brcmfmac",)
 CHANNELS = {"2.4": tuple(range(1, 14)), "5": (36, 40, 44, 48, 149, 153, 157, 161, 165)}
 DEFAULT_CHANNEL = {"2.4": 6, "5": 36}
@@ -93,37 +95,48 @@ def valid_join_password(password):
     return password == "" or valid_passphrase(password) or bool(re.fullmatch(r"[0-9A-Fa-f]{64}", password))
 
 
+def make_password():
+    """A password that is easy to read off a screen and type on a phone, such as kq7m-x2np-84hd."""
+    return "-".join("".join(secrets.choice(PASSWORD_LETTERS) for _ in range(4)) for _ in range(3))
+
+
 class Settings:
     def __init__(self):
         self.name = DEFAULT_NAME
-        self.password = FALLBACK_PASSWORD
+        self.password = None  # no usable password: the mixer's own Wi-Fi stays off
         self.band = "2.4"
         self.channel = DEFAULT_CHANNEL["2.4"]
         self.radio = "auto"
         self.joins = []  # (slot, name, password)
-        self.problems = []
+        self.issues = []  # (setting, what is wrong and what happens instead)
+
+    @property
+    def problems(self):
+        return [text for _key, text in self.issues]
 
 
-def load_settings():
+def load_settings(raw=None):
+    """The settings in use. raw is the file's content if the caller has it already (or wants to try a change)."""
     settings = Settings()
-    try:
-        raw = read_raw()
-    except OSError as exc:
-        settings.problems.append("cannot read %s (%s); using the built-in settings" % (SETTINGS_FILE, exc.strerror))
-        raw = {}
+    if raw is None:
+        try:
+            raw = read_raw()
+        except OSError as exc:
+            settings.issues.append(("FILE", "cannot read %s (%s); using the built-in settings" % (SETTINGS_FILE, exc.strerror)))
+            raw = {}
 
     name = raw.get("WIFI_NAME", "")
     if valid_name(name):
         settings.name = name
     elif name:
-        settings.problems.append("WIFI_NAME must be 1 to 32 characters; using %s" % DEFAULT_NAME)
+        settings.issues.append(("WIFI_NAME", "WIFI_NAME must be 1 to 32 characters; using %s" % DEFAULT_NAME))
 
     password = raw.get("WIFI_PASSWORD", "")
     if valid_passphrase(password):
         settings.password = password
     else:
-        settings.problems.append(
-            "WIFI_PASSWORD must be 8 to 63 plain characters; using the fallback password %s" % FALLBACK_PASSWORD
+        settings.issues.append(
+            ("WIFI_PASSWORD", "WIFI_PASSWORD must be 8 to 63 plain characters; the mixer's own Wi-Fi is off until it is")
         )
 
     band = raw.get("WIFI_BAND", "2.4").lower().replace("ghz", "").strip()
@@ -132,34 +145,35 @@ def load_settings():
     elif band in ("5", "a"):
         settings.band = "5"
     else:
-        settings.problems.append("WIFI_BAND must be 2.4 or 5; using 2.4")
+        settings.issues.append(("WIFI_BAND", "WIFI_BAND must be 2.4 or 5; using 2.4"))
     settings.channel = DEFAULT_CHANNEL[settings.band]
     channel = raw.get("WIFI_CHANNEL", "")
     if channel:
         if channel.isdigit() and int(channel) in CHANNELS[settings.band]:
             settings.channel = int(channel)
         else:
-            settings.problems.append(
-                "WIFI_CHANNEL %s is not a %s GHz channel; using %d" % (channel, settings.band, settings.channel)
+            settings.issues.append(
+                ("WIFI_CHANNEL", "WIFI_CHANNEL %s is not a %s GHz channel; using %d" % (channel, settings.band, settings.channel))
             )
 
     radio = raw.get("WIFI_RADIO", "auto").lower() or "auto"
     if radio in ("auto", "usb", "onboard"):
         settings.radio = radio
     else:
-        settings.problems.append("WIFI_RADIO must be auto, usb or onboard; using auto")
+        settings.issues.append(("WIFI_RADIO", "WIFI_RADIO must be auto, usb or onboard; using auto"))
 
     for slot in range(1, JOIN_SLOTS + 1):
         join_name = raw.get("JOIN_WIFI_%d" % slot, "")
         join_password = raw.get("JOIN_WIFI_%d_PASSWORD" % slot, "")
         if not join_name:
             continue
+        key = "JOIN_WIFI_%d" % slot
         if not valid_name(join_name):
-            settings.problems.append("JOIN_WIFI_%d is not a usable network name; skipped" % slot)
+            settings.issues.append((key, "%s is not a usable network name; skipped" % key))
         elif join_name == settings.name:
-            settings.problems.append("JOIN_WIFI_%d is the mixer's own network name; skipped" % slot)
+            settings.issues.append((key, "%s is the mixer's own network name; skipped" % key))
         elif not valid_join_password(join_password):
-            settings.problems.append("JOIN_WIFI_%d_PASSWORD must be 8 to 63 characters, or blank; skipped" % slot)
+            settings.issues.append((key + "_PASSWORD", "%s_PASSWORD must be 8 to 63 characters, or blank; skipped" % key))
         else:
             settings.joins.append((slot, join_name, join_password))
     return settings
@@ -201,14 +215,19 @@ def write_if_changed(path, text, mode=None):
             return False
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(path.name + ".tmp")
-    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600 if mode is None else mode)
-    with os.fdopen(fd, "w") as handle:
-        handle.write(text)
-        handle.flush()
-        os.fsync(handle.fileno())
-    if mode is not None:
-        os.chmod(temp, mode)
-    os.replace(temp, path)
+    try:
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600 if mode is None else mode)
+        with os.fdopen(fd, "w") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if mode is not None:
+            os.chmod(temp, mode)
+        os.replace(temp, path)
+    except OSError:
+        with contextlib.suppress(OSError):
+            temp.unlink()
+        raise
     return True
 
 
@@ -231,6 +250,25 @@ def update_file(changes):
         out.append("%s=%s" % (key, file_value(value)))
     with writable_boot():
         write_if_changed(SETTINGS_FILE, "\n".join(out) + "\n")
+
+
+def ensure_wifi_password():
+    """Never run the mixer's own Wi-Fi on a password that is written down somewhere public.
+
+    A blank or unusable WIFI_PASSWORD is replaced by a made-up one, saved in campmixer.txt for its owner to read.
+    """
+    try:
+        current = read_raw().get("WIFI_PASSWORD", "")
+    except OSError:
+        current = ""
+    if valid_passphrase(current):
+        return
+    try:
+        update_file({"WIFI_PASSWORD": make_password()})
+    except (OSError, subprocess.SubprocessError) as exc:
+        log("could not save a new Wi-Fi password in %s (%s)" % (SETTINGS_FILE, exc))
+        return
+    log("WIFI_PASSWORD was %s, so a new one was made up. It is in campmixer.txt" % ("not usable" if current else "blank"))
 
 
 # ---------------------------------------------------------------- NetworkManager profiles
@@ -315,10 +353,24 @@ def wifi_devices():
     return devices
 
 
+def is_usb_radio(device):
+    return device[1] not in ONBOARD_DRIVERS
+
+
+def usb_device_plugged_in():
+    """True when anything but a hub is on the USB ports. It might be a Wi-Fi adaptor that is still starting."""
+    with contextlib.suppress(OSError):
+        for entry in SYS_USB.iterdir():
+            with contextlib.suppress(OSError):
+                if (entry / "bDeviceClass").read_text().strip() != "09":
+                    return True
+    return False
+
+
 def choose_radio(policy, devices):
     """Which radio carries the Wi-Fi, and which NetworkManager must leave alone."""
-    usb = [dev for dev in devices if dev[1] not in ONBOARD_DRIVERS]
-    onboard = [dev for dev in devices if dev[1] in ONBOARD_DRIVERS]
+    usb = [dev for dev in devices if is_usb_radio(dev)]
+    onboard = [dev for dev in devices if not is_usb_radio(dev)]
     hands_off_onboard = ",".join("driver:" + driver for driver in ONBOARD_DRIVERS)
     hands_off_usb = "type:wifi," + ",".join("except:driver:" + driver for driver in ONBOARD_DRIVERS)
     if policy == "usb":
@@ -337,20 +389,32 @@ def nm_conf(unmanaged):
     return "\n".join(lines)
 
 
-def apply():
+def apply(starting_up=False):
+    ensure_wifi_password()
     settings = load_settings()
     for problem in settings.problems:
         log("settings: " + problem)
-    if not TESTING:
+    if starting_up and not TESTING:
         # Let a USB Wi-Fi adaptor finish appearing before deciding which radio to use.
         with contextlib.suppress(OSError, subprocess.SubprocessError):
             subprocess.run(["udevadm", "settle", "--timeout=5"], check=False, timeout=10)
     devices = wifi_devices()
+    if starting_up and settings.radio == "auto" and not any(map(is_usb_radio, devices)) and usb_device_plugged_in():
+        # Something is plugged in but no USB radio has shown up yet. An adaptor can take a few seconds
+        # longer than the built-in radio, and picking the built-in one by mistake would cost the range.
+        log("something is plugged into USB; giving a Wi-Fi adaptor up to 6 s to appear")
+        for _ in range(12):
+            pause(0.5)
+            devices = wifi_devices()
+            if any(map(is_usb_radio, devices)):
+                break
     chosen, unmanaged = choose_radio(settings.radio, devices)
     found = ", ".join("%s (%s)" % dev for dev in devices) or "none"
     log("radios found: %s; using %s" % (found, "%s (%s)" % chosen if chosen else "none"))
 
-    wanted = {AP_PROFILE: ap_profile(settings), ETH_PROFILE: eth_profile(), ETH_DIRECT_PROFILE: eth_direct_profile()}
+    wanted = {ETH_PROFILE: eth_profile(), ETH_DIRECT_PROFILE: eth_direct_profile()}
+    if settings.password:
+        wanted[AP_PROFILE] = ap_profile(settings)
     for slot, name, password in settings.joins:
         wanted["%s%d" % (JOIN_PREFIX, slot)] = join_profile(slot, name, password)
     NM_PROFILES.mkdir(parents=True, exist_ok=True)
@@ -417,6 +481,9 @@ def joined(state):
 
 
 def start_own(device):
+    if load_settings().password is None:
+        log("the mixer's own Wi-Fi is off: WIFI_PASSWORD in campmixer.txt is not usable")
+        return False
     state = wifi_state()
     if state and state[2] == AP_PROFILE and state[1] == "connected":
         return True
@@ -514,7 +581,7 @@ def show(with_passwords):
         return value if with_passwords else ("(none)" if not value else "*" * 8)
 
     print("Own Wi-Fi name:     " + settings.name)
-    print("Own Wi-Fi password: " + secret(settings.password))
+    print("Own Wi-Fi password: " + (secret(settings.password) if settings.password else "(not set, so the own Wi-Fi is off)"))
     print("Band and channel:   %s GHz, channel %d" % (settings.band, settings.channel))
     print("Radio:              " + settings.radio)
     if settings.joins:
@@ -536,6 +603,17 @@ def set_values(pairs):
             print("Not a setting: %s. Settings are: %s" % (pair, ", ".join(KNOWN_KEYS)), file=sys.stderr)
             return 2
         changes[key] = value
+    try:
+        raw = read_raw()
+    except OSError:
+        raw = {}
+    # Refuse a value the mixer could not use, rather than save it and fall back to something else.
+    touched = set(changes) | ({"WIFI_CHANNEL"} if "WIFI_BAND" in changes else set())
+    refused = [text for key, text in load_settings({**raw, **changes}).issues if key in touched]
+    if refused:
+        for text in refused:
+            print("Not changed: " + text.split(";")[0] + ".", file=sys.stderr)
+        return 2
     update_file(changes)
     return finish_change()
 
@@ -587,7 +665,7 @@ def main(argv):
     command = argv[1] if len(argv) > 1 else ""
     rest = argv[2:]
     if command == "apply" and not rest:
-        return apply()
+        return apply(starting_up=True)
     if command == "radio" and not rest:
         return radio()
     if command == "show" and rest in ([], ["--passwords"]):

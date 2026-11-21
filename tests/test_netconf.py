@@ -6,6 +6,7 @@ and the name and password escaping is compared with what nmcli itself writes.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -18,6 +19,7 @@ os.chmod(FAKE_NMCLI, 0o755)
 NMCLI = shutil.which("nmcli")
 BASE = "WIFI_NAME=CampMixer\nWIFI_PASSWORD=abcd-efgh-jkmn\n"
 ONBOARD, USB = ("wlan0", "brcmfmac"), ("wlan1", "mt76x2u")
+MADE_UP = r"[a-z2-9]{4}-[a-z2-9]{4}-[a-z2-9]{4}"
 
 
 def make_root(settings, radios):
@@ -28,12 +30,28 @@ def make_root(settings, radios):
             handle.write(settings)
     os.makedirs(root + "/var/lib/NetworkManager")
     for name, driver in [("eth0", None)] + list(radios):
-        os.makedirs("%s/sys/class/net/%s/device" % (root, name))
-        if driver:
-            os.makedirs("%s/sys/class/net/%s/wireless" % (root, name))
-            os.makedirs("%s/sys/bus/drivers/%s" % (root, driver), exist_ok=True)
-            os.symlink("%s/sys/bus/drivers/%s" % (root, driver), "%s/sys/class/net/%s/device/driver" % (root, name))
+        add_interface(root, name, driver)
     return root
+
+
+def add_interface(root, name, driver):
+    os.makedirs("%s/sys/class/net/%s.new/device" % (root, name))
+    if driver:
+        os.makedirs("%s/sys/class/net/%s.new/wireless" % (root, name))
+        os.makedirs("%s/sys/bus/drivers/%s" % (root, driver), exist_ok=True)
+        os.symlink("%s/sys/bus/drivers/%s" % (root, driver), "%s/sys/class/net/%s.new/device/driver" % (root, name))
+    os.rename("%s/sys/class/net/%s.new" % (root, name), "%s/sys/class/net/%s" % (root, name))  # appears complete
+
+
+def plug_into_usb(root, port, device_class):
+    os.makedirs("%s/sys/bus/usb/devices/%s" % (root, port))
+    with open("%s/sys/bus/usb/devices/%s/bDeviceClass" % (root, port), "w") as handle:
+        handle.write(device_class + "\n")
+
+
+def settings_file(root):
+    with open(root + "/boot/firmware/campmixer.txt") as handle:
+        return handle.read()
 
 
 def run(root, *args, **extra_env):
@@ -109,6 +127,34 @@ assert "using none" in run(only, "apply").stderr and "match-device=driver:brcmfm
 none = make_root(BASE, [])
 assert "radios found: none" in run(none, "apply").stderr and profiles(none)[0] == "campmixer-ap"
 
+# A USB adaptor that is plugged in but slow to start is waited for, so the built-in radio is not picked by mistake.
+hubs = make_root(BASE, [ONBOARD])
+plug_into_usb(hubs, "usb1", "09")
+plug_into_usb(hubs, "1-1", "09")
+os.makedirs(hubs + "/sys/bus/usb/devices/1-1:1.0")  # an interface entry: no bDeviceClass in it
+done = run(hubs, "apply")
+assert "using wlan0 (brcmfmac)" in done.stderr and "plugged into USB" not in done.stderr, done.stderr
+slow = make_root(BASE, [ONBOARD])
+plug_into_usb(slow, "1-1", "09")
+plug_into_usb(slow, "1-1.2", "ff")
+waiting = subprocess.Popen([sys.executable, NETCONF, "apply"], stderr=subprocess.PIPE, text=True,
+                           env=dict(os.environ, CAMPMIXER_ROOT=slow, CAMPMIXER_SYS_NET=slow + "/sys/class/net"))
+assert "plugged into USB" in waiting.stderr.readline()  # it has started to wait
+add_interface(slow, *USB)
+rest = waiting.stderr.read()
+assert waiting.wait() == 0 and "using wlan1 (mt76x2u)" in rest, rest
+assert "match-device=driver:brcmfmac\nmanaged=0" in conf(slow)
+never = make_root(BASE, [ONBOARD])
+plug_into_usb(never, "1-1.3", "08")  # a USB stick, say
+done = run(never, "apply", CAMPMIXER_TIME_SCALE="0.001")
+assert "plugged into USB" in done.stderr and "using wlan0 (brcmfmac)" in done.stderr and "match-device" not in conf(never)
+fixed = make_root(BASE + "WIFI_RADIO=onboard\n", [ONBOARD])
+plug_into_usb(fixed, "1-1.3", "08")
+assert "plugged into USB" not in run(fixed, "apply").stderr  # told which radio to use: nothing to wait for
+edit_time = make_root(BASE + "JOIN_WIFI_1=\n", [ONBOARD])
+plug_into_usb(edit_time, "1-1.3", "08")
+assert "plugged into USB" not in run(edit_time, "join", "Somewhere").stderr  # only at start-up, not on every change
+
 # --- 3. networks to join, and cleaning up after they are removed
 joins = make_root(
     BASE + "JOIN_WIFI_1=Church Hall\nJOIN_WIFI_1_PASSWORD=hall-password\nJOIN_WIFI_2=Open Net\n"
@@ -124,16 +170,40 @@ assert run(joins, "forget", "Church Hall").returncode == 0
 assert "campmixer-join-1" not in profiles(joins) and "campmixer-join-2" in profiles(joins)
 
 # --- 4. mistakes in the file fall back to something that still works
-bad = make_root("WIFI_NAME=%s\nWIFI_PASSWORD=short\nWIFI_BAND=5\nWIFI_CHANNEL=6\nWIFI_RADIO=both\n" % ("x" * 40), [USB])
+bad = make_root("# mine\nWIFI_NAME=%s\nWIFI_PASSWORD=short\nWIFI_BAND=5\nWIFI_CHANNEL=6\nWIFI_RADIO=both\n" % ("x" * 40), [USB])
 done = run(bad, "apply")
 ap = profile(bad, "campmixer-ap")
-assert ap["wifi"]["ssid"] == "CampMixer" and ap["wifi-security"]["psk"] == "campmixer-setup"
-assert ap["wifi"]["band"] == "a" and ap["wifi"]["channel"] == "36"
-assert done.stderr.count("settings:") == 4, done.stderr
+assert ap["wifi"]["ssid"] == "CampMixer" and ap["wifi"]["band"] == "a" and ap["wifi"]["channel"] == "36"
+assert done.stderr.count("settings:") == 3, done.stderr
+
+# There is no built-in Wi-Fi password. An unusable or blank one is replaced by a made-up one, saved in the file.
+made_up = re.search(r"^WIFI_PASSWORD=(%s)$" % MADE_UP, settings_file(bad), re.M)
+assert made_up and ap["wifi-security"]["psk"] == made_up.group(1), settings_file(bad)
+assert "WIFI_PASSWORD was not usable" in done.stderr and settings_file(bad).startswith("# mine\nWIFI_NAME=xxx")
+assert "setup" not in ap["wifi-security"]["psk"] and "short" not in settings_file(bad)
+again = run(bad, "apply")
+assert "made up" not in again.stderr and made_up.group(0) in settings_file(bad)  # and it stays the same after that
+blank = make_root("WIFI_NAME=CampMixer\nWIFI_PASSWORD=\n", [USB])
+assert "WIFI_PASSWORD was blank" in run(blank, "apply").stderr
+assert re.search(r"^psk=%s$" % MADE_UP, open(profile_path(blank, "campmixer-ap")).read(), re.M)
 missing = make_root(None, [USB])
 done = run(missing, "apply")
-assert done.returncode == 0 and "cannot read" in done.stderr
-assert profile(missing, "campmixer-ap")["wifi-security"]["psk"] == "campmixer-setup"
+assert done.returncode == 0, done.stderr
+made_up = re.search(r"^WIFI_PASSWORD=(%s)$" % MADE_UP, settings_file(missing), re.M)
+assert made_up and profile(missing, "campmixer-ap")["wifi-security"]["psk"] == made_up.group(1)
+
+# If the made-up password cannot be saved, nobody could ever learn it, so the own network stays off instead.
+stuck = make_root(BASE, [USB])
+run(stuck, "apply")
+assert "campmixer-ap" in profiles(stuck)  # from an earlier start-up, when all was well
+os.remove(stuck + "/boot/firmware/campmixer.txt")
+os.makedirs(stuck + "/boot/firmware/campmixer.txt")  # a folder where the file should be: it cannot be written
+done = run(stuck, "apply")
+assert done.returncode == 0 and "could not save a new Wi-Fi password" in done.stderr, done.stderr
+assert "campmixer-ap" not in profiles(stuck) and "campmixer-eth" in profiles(stuck)
+assert os.listdir(stuck + "/boot/firmware") == ["campmixer.txt"]  # no half-written file left lying about
+shown = run(stuck, "show")
+assert shown.returncode == 1 and "own Wi-Fi is off" in shown.stdout, shown.stdout
 windows = make_root("﻿WIFI_NAME = \"Hall Mixer\"\r\nWIFI_PASSWORD='with space 1'\r\n# note\r\n", [USB])
 run(windows, "apply")
 assert profile(windows, "campmixer-ap")["wifi"]["ssid"] == "Hall Mixer"
@@ -165,6 +235,28 @@ assert run(edit, "join", "Five").returncode == 2
 assert run(edit, "join", "x", "short").returncode == 2
 assert run(edit, "set", "NOT_A_SETTING=1").returncode == 2
 assert run(edit, "forget", "Nobody").returncode == 2
+
+# A value the mixer could not use is refused, and nothing is changed.
+before = settings_file(edit)
+for refused, reason in (
+    (["WIFI_PASSWORD=short"], "WIFI_PASSWORD must be 8 to 63 plain characters."),
+    (["WIFI_PASSWORD="], "WIFI_PASSWORD must be 8 to 63"),
+    (["WIFI_NAME=Fine Name", "WIFI_PASSWORD=pässword-long"], "WIFI_PASSWORD must be"),
+    (["WIFI_NAME=" + "x" * 33], "WIFI_NAME must be 1 to 32 characters."),
+    (["WIFI_BAND=6"], "WIFI_BAND must be 2.4 or 5."),
+    (["WIFI_BAND=5"], "WIFI_CHANNEL 11 is not a 5 GHz channel."),
+    (["WIFI_CHANNEL=36"], "WIFI_CHANNEL 36 is not a 2.4 GHz channel."),
+    (["WIFI_RADIO=both"], "WIFI_RADIO must be auto, usb or onboard."),
+    (["JOIN_WIFI_1_PASSWORD=short"], "JOIN_WIFI_1_PASSWORD must be 8 to 63 characters, or blank."),
+):
+    done = run(edit, "set", *refused)
+    assert done.returncode == 2 and "Not changed: " + reason in done.stderr, (refused, done.stderr)
+    assert settings_file(edit) == before, refused
+assert run(edit, "set", "WIFI_BAND=5", "WIFI_CHANNEL=").returncode == 0  # a new band with that band's usual channel
+assert profile(edit, "campmixer-ap")["wifi"]["band"] == "a" and profile(edit, "campmixer-ap")["wifi"]["channel"] == "36"
+assert run(edit, "set", "WIFI_PASSWORD=a new long password").returncode == 0
+assert profile(edit, "campmixer-ap")["wifi-security"]["psk"] == "a new long password"
+assert run(edit, "set", "LOGIN_PASSWORD=").returncode == 0
 shown = run(edit, "show")
 assert "site-password" not in shown.stdout and "Camp Site" in shown.stdout
 assert "new-password" in run(edit, "show", "--passwords").stdout
@@ -262,5 +354,9 @@ assert actions == ["scan", "up campmixer-join-1", "up campmixer-ap"] and "could 
 
 done, actions, end = radio(JOIN, dev="")
 assert done.returncode == 0 and actions == [] and "Ethernet only" in done.stderr
+
+# no usable password and no way to save one: the own network is not started, and that is said plainly
+done, actions, end = radio("WIFI_PASSWORD=short\n")
+assert done.returncode == 0 and actions == [] and "own Wi-Fi is off" in done.stderr, (actions, done.stderr)
 
 print("netconf: all checks passed")

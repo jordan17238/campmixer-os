@@ -114,7 +114,11 @@ put 644 opt/campmixer/campmixer_link.py
 put 644 opt/campmixer/www/index.html
 put 644 opt/campmixer/www/manifest.webmanifest
 put 644 opt/campmixer/www/icon.svg
-put 755 usr/local/sbin/campmixer
+put 755 usr/local/bin/campmixer
+rm -f "$ROOT/usr/local/sbin/campmixer" # where versions before 0.2.1 kept it, out of an ordinary user's reach
+put 755 etc/systemd/system-generators/campmixer-bootro
+put 755 etc/initramfs-tools/scripts/init-premount/campmixer-nofsck
+put 644 etc/systemd/system/systemd-remount-fs.service.d/10-campmixer-overlay.conf
 put 644 etc/systemd/system/campmixer-netconf.service
 put 644 etc/systemd/system/campmixer-radio.service
 put 644 etc/systemd/system/campmixer-bridge.service
@@ -190,19 +194,8 @@ if [ ! -f "$SETTINGS" ]; then
 	say "Creating $SETTINGS"
 	cp "$SRC/campmixer.txt" "$SETTINGS"
 fi
-# An image must not carry a password, so a blank one stays blank until the image's first start.
-if [ "$IMAGE" = 0 ] && ! grep -qE '^WIFI_PASSWORD=.{8,}' "$SETTINGS"; then
-	PASSWORD="$(python3 -c '
-import secrets
-letters = "abcdefghjkmnpqrstuvwxyz23456789"
-print("-".join("".join(secrets.choice(letters) for _ in range(4)) for _ in range(3)))
-')"
-	if grep -q '^WIFI_PASSWORD=' "$SETTINGS"; then
-		sed -i "s/^WIFI_PASSWORD=.*/WIFI_PASSWORD=$PASSWORD/" "$SETTINGS"
-	else
-		echo "WIFI_PASSWORD=$PASSWORD" >>"$SETTINGS"
-	fi
-fi
+# A blank Wi-Fi password stays blank here. "netconf apply" makes one up: further down on a running Pi,
+# and at the first start for an image, which must not carry a password.
 
 # ------------------------------------------------------------------ services
 
@@ -235,6 +228,15 @@ if [ "$REAL" = 1 ]; then
 	done
 fi
 
+# ------------------------------------------------------------------ start-up image
+
+# campmixer-nofsck and overlayroot's own script only take effect from inside the initramfs.
+# An image build makes its initramfs at the very end (pi-gen's export-image stage), so only a running Pi needs this.
+if [ "$LIVE" = 1 ]; then
+	say "Rebuilding the start-up image (takes a minute)"
+	update-initramfs -u -k all || die "Could not rebuild the start-up image (initramfs)."
+fi
+
 # ------------------------------------------------------------------ done
 
 say "CampMixer OS $VERSION is installed"
@@ -258,7 +260,7 @@ if [ "$LIVE" = 1 ]; then
 		echo "The card is left writable because CAMPMIXER_NO_LOCK=1. Lock it later with: sudo campmixer lock"
 	else
 		say "Locking the card"
-		if /usr/local/sbin/campmixer lock; then
+		if /usr/local/bin/campmixer lock; then
 			echo "From the next start nothing is written to the card, and the power can be pulled at any time."
 			echo "To change or update things later: sudo campmixer unlock, restart, make the change, sudo campmixer lock."
 		else

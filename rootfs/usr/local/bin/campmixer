@@ -32,7 +32,13 @@ need_root() {
 	[ "$(id -u)" -eq 0 ] || die "Run this with sudo."
 }
 
-locked_now() {
+# The one switch is the word overlayroot=tmpfs in cmdline.txt. With it the system runs on a layer in memory
+# over a read-only card, and the boot partition is mounted read-only to match (campmixer-bootro does that).
+locked_now() { # what is true right now, not what was asked for
+	[ "$(findmnt -n -o FSTYPE / 2>/dev/null)" = overlay ]
+}
+
+lock_asked_now() {
 	grep -q "overlayroot=tmpfs" /proc/cmdline
 }
 
@@ -41,13 +47,15 @@ locked_next() {
 }
 
 cmd_status() {
-	local model storage dev type state conn stations found=0
+	local model storage dev type state conn stations driver found=0
 	model="$(tr -d '\0' </proc/device-tree/model 2>/dev/null || echo "unknown computer")"
 	echo "CampMixer OS $VERSION on $(hostname) ($model)"
 
 	if locked_now; then
 		storage="locked, safe to pull the power"
 		locked_next || storage="$storage (unlocks at the next restart)"
+	elif lock_asked_now; then
+		storage="NOT locked. The read-only layer did not start, so the card is being written to. See: campmixer logs"
 	else
 		storage="unlocked, changes are kept"
 		locked_next && storage="$storage (locks at the next restart)"
@@ -58,17 +66,24 @@ cmd_status() {
 		while IFS=: read -r dev type state conn; do
 			[ "$type" = wifi ] || continue
 			found=1
+			# Which radio it is matters: the built-in one sits inside the metal case.
+			driver="$(basename "$(readlink -f "/sys/class/net/$dev/device/driver" 2>/dev/null)" 2>/dev/null)"
+			case "$driver" in
+			brcmfmac) dev="$dev (built-in radio)" ;;
+			"") ;;
+			*) dev="$dev (USB adaptor, $driver)" ;;
+			esac
 			case "$state:$conn" in
 			unmanaged:*)
-				echo "Wi-Fi:     $dev is not used"
+				echo "Wi-Fi:     ${dev%% *} is not used"
 				;;
 			connected:campmixer-ap)
 				stations="?"
-				command -v iw >/dev/null 2>&1 && stations="$(iw dev "$dev" station dump 2>/dev/null | grep -c '^Station')"
+				command -v iw >/dev/null 2>&1 && stations="$(iw dev "${dev%% *}" station dump 2>/dev/null | grep -c '^Station')"
 				echo "Wi-Fi:     own network on $dev, $stations connected"
 				;;
 			connected:campmixer-join-*)
-				echo "Wi-Fi:     joined $(iw dev "$dev" link 2>/dev/null | sed -n 's/^[[:space:]]*SSID: //p') on $dev"
+				echo "Wi-Fi:     joined $(iw dev "${dev%% *}" link 2>/dev/null | sed -n 's/^[[:space:]]*SSID: //p') on $dev"
 				;;
 			*)
 				echo "Wi-Fi:     $dev is $state"
@@ -167,29 +182,19 @@ cmd_lock() {
 	if ! dpkg-query -W -f='${Status}' overlayroot 2>/dev/null | grep -q "install ok installed"; then
 		apt-get install -y overlayroot || die "Could not install overlayroot. Connect the Pi to the internet and try again."
 	fi
-	if ! locked_now; then
-		# The boot partition's entry in fstab can only be changed while the card is still writable.
-		raspi-config nonint enable_bootro || die "Could not make the boot partition read-only."
-	fi
 	raspi-config nonint enable_overlayfs || die "Could not switch the read-only overlay on."
+	locked_next || die "Could not switch the read-only overlay on: cmdline.txt was not changed."
 	echo "Locked from the next start. Restart now with: sudo reboot"
 }
 
 cmd_unlock() {
 	need_root
 	if ! locked_now && ! locked_next; then
-		raspi-config nonint disable_bootro >/dev/null 2>&1
 		echo "Already unlocked."
 		return 0
 	fi
 	raspi-config nonint disable_overlayfs || die "Could not switch the read-only overlay off."
-	if locked_now; then
-		# /etc/fstab is under the overlay right now, so change the real one beneath it.
-		overlayroot-chroot sed -i -e 's#\(.*/boot/firmware.*\)defaults,ro\(.*\)#\1defaults\2#' /etc/fstab ||
-			echo "Note: the boot partition stays read-only. After the restart run: sudo raspi-config nonint disable_bootro"
-	else
-		raspi-config nonint disable_bootro
-	fi
+	! locked_next || die "Could not switch the read-only overlay off: cmdline.txt was not changed."
 	echo "Unlocked from the next start. Restart now with: sudo reboot"
 }
 
@@ -199,10 +204,22 @@ cmd_firststart() {
 	local flag=/var/lib/campmixer/first-start
 	need_root
 	[ -e "$flag" ] || return 0
+	if locked_now; then
+		# Locked, yet still marked as never started: the power went off in the last moment of the first
+		# start. Nothing done now would be kept, so go back and finish it properly.
+		echo "The first start did not finish. Unlocking and restarting to finish it."
+		(cmd_unlock) || die "Could not unlock to finish the first start. See: campmixer logs"
+		sync
+		systemctl reboot
+		return 0
+	fi
 	timeout 180 systemctl is-system-running --wait >/dev/null 2>&1
 	python3 "$APP/firststart.py" || die "First-start set-up failed. It tries again at the next start. See: campmixer logs"
+	sync
+	# The marker goes only once the card is set to lock, so a failure here is tried again at the next start
+	# instead of leaving the card writable for good.
+	(cmd_lock) || die "First-start set-up could not lock the card. It tries again at the next start. See: campmixer logs"
 	rm -f "$flag"
-	cmd_lock || exit 1
 	sync
 	systemctl reboot
 }

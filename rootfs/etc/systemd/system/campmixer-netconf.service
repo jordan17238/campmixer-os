@@ -9,7 +9,8 @@ ConditionPathExists=/opt/campmixer/netconf.py
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/bin/python3 /opt/campmixer/netconf.py apply
-TimeoutStartSec=45
+# Normally well under a second. The limit only matters if the card is very slow or very busy.
+TimeoutStartSec=120
 
 [Install]
 WantedBy=multi-user.target

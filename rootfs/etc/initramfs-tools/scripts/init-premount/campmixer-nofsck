@@ -1,0 +1,26 @@
+#!/bin/sh
+# Part of the start-up image (initramfs). Runs before the root file system is mounted.
+#
+# While the card is locked nothing writes to it, so a power cut cannot have damaged its file system
+# and the start-up check has nothing to find. The check itself does write to the card, though:
+# two blocks at every start, measured. A locked card is meant never to be written, so:
+#   locked   -> no check
+#   unlocked -> the stock check, as on any Raspberry Pi OS
+#
+# CAMPMIXER_CMDLINE and CAMPMIXER_PARAM_CONF point the tests at pretend files.
+PREREQ=""
+prereqs() {
+	echo "$PREREQ"
+}
+case "${1:-}" in
+prereqs)
+	prereqs
+	exit 0
+	;;
+esac
+
+if grep -qE '(^|[[:space:]])overlayroot=tmpfs' "${CAMPMIXER_CMDLINE:-/proc/cmdline}" 2>/dev/null; then
+	# The start-up image's own switch for "skip the checks"; it reads this file back after each script.
+	echo "fastboot=y" >>"${CAMPMIXER_PARAM_CONF:-/conf/param.conf}"
+fi
+exit 0

@@ -1,4 +1,4 @@
-# CampMixer OS 0.2.0
+# CampMixer OS 0.2.1
 
 Its own operating system for the Camp PA Mixer's Raspberry Pi, built on Raspberry Pi OS Lite (64-bit).
 You write one image to a microSD card and the Pi starts up as the mixer's remote. There is no install step.
@@ -12,7 +12,7 @@ This folder is the source for that image.
 - **Ethernet.** Plug it into any network and it takes an address. A cable straight to a laptop works too.
 - **SSH** is on: `ssh mixer@mixer.local`.
 - **Serial link** to the mixer core on header pins 8 and 10, 115200 baud, with the console kept off it.
-- **Read-only card.** After its first start nothing writes to the microSD card, and the power can be pulled at any time.
+- **Read-only card.** After its first start nothing writes to the microSD card, not even while starting up, and the power can be pulled at any time.
 - **Hardware watchdog.** If the Pi hangs it restarts itself. The mixer's audio and knobs never depend on the Pi.
 - **Bluetooth off.** The built-in Wi-Fi radio is left alone whenever a USB Wi-Fi adaptor is fitted.
 
@@ -29,16 +29,18 @@ The image is built by Raspberry Pi's own image builder (pi-gen) with one extra s
 
 The image lands in `image/build/pi-gen/deploy/`.
 
-No password is built into the image, so the image file is safe to keep anywhere.
+No password is built into the image or into this source, so both are safe to keep anywhere.
 
 ## First start
 
 1. In **Raspberry Pi Imager** choose *Use custom*, pick the `.img.xz` file and write it to the card. Skip the customisation step.
-2. Optional, before the first start: take the card out and put it back in, open `campmixer.txt` on the `bootfs` drive and fill in what you want: the Wi-Fi password, your login password, any networks to join.
-3. Put the card in the Pi and power it. The first start takes about two minutes and restarts itself once: it grows the file system to fill the card, makes its SSH keys, sets the passwords and locks the card.
+2. Before the first start: take the card out and put it back in, open `campmixer.txt` on the `bootfs` drive and type in `WIFI_PASSWORD` and `LOGIN_PASSWORD` (8 characters or more each), and any networks to join. Doing this now saves pulling the card later to read made-up ones.
+3. Put the card in the Pi and power it. The first start takes about two minutes and restarts itself once (twice if the Pi's own bootloader gets an update): it grows the file system to fill the card, makes its SSH keys, sets the passwords and locks the card.
 4. Open **http://mixer.local**, or log in with `ssh mixer@mixer.local`.
 
 Any password you left blank is made up on that first start and written into `campmixer.txt`. Put the card back in your computer to read it. A login password you chose yourself is removed from the file once it has been set.
+
+`sudo` asks for that same login password.
 
 ## The settings file
 
@@ -61,11 +63,13 @@ How the radio decides, at every start:
 
 One radio does one job at a time, so while it is on a venue's Wi-Fi the `CampMixer` network is not there. Ethernet is separate and always works alongside either.
 
-Networks that need a username, or a sign-in web page, cannot be joined. If the Wi-Fi password in the file is unusable, the own network uses the fallback password `campmixer-setup`.
+Networks that need a username, or a sign-in web page, cannot be joined.
+
+There is no built-in Wi-Fi password. If `WIFI_PASSWORD` is blank or cannot be used (it needs 8 to 63 characters), the mixer makes one up at start-up and writes it into the file. The commands refuse a value the mixer could not use, and change nothing.
 
 ## Commands
 
-    campmixer status                          what it is doing now
+    campmixer status                          what it is doing now, and which radio it is using
     sudo campmixer wifi                       settings in use, with passwords
     sudo campmixer wifi join "Church Hall" "its password"
     sudo campmixer wifi forget "Church Hall"
@@ -82,6 +86,7 @@ The Wi-Fi commands take effect straight away and also work while the card is loc
 A microSD card wears out from writes, so the aim is no writes at all.
 
 - **Locked** (the normal state): the whole system runs on a copy-on-write layer in memory, and the boot partition is mounted read-only. Nothing reaches the card. Anything changed while locked is gone at the next start, which is the point.
+- Being locked is one word, `overlayroot=tmpfs`, in `cmdline.txt`. Everything else follows from it at start-up: the boot partition goes read-only, and the stock file system check is skipped, because that check writes two blocks to the card every time it runs.
 - Logs stay in memory, capped at 24 MB.
 - Swap is compressed memory only. Raspberry Pi OS's default also keeps a swap file on the card; that is switched off.
 - Scheduled jobs that write (package checks, log rotation, manual-page index, package database backup, file system scrub) are off.
@@ -146,4 +151,4 @@ Not tested, because it needs a build machine or the real hardware:
 
 Expect the first build or the first start to need a fix or two. The build log, `campmixer logs` and `campmixer status` are the things to send back.
 
-To re-run the checks: `python3 tests/test_link.py`, `python3 tests/test_bridge.py` (needs `pip install websockets`), `python3 tests/test_netconf.py`, `python3 tests/test_firststart.py`, `bash tests/test_install.sh`.
+To re-run the checks: `bash ci/checks.sh` (it makes a Python environment with `websockets` in it and runs everything in `tests/`).

@@ -6,7 +6,7 @@
 
 # ---- The mixer's own Wi-Fi network ----
 # Used whenever it has no listed network to join. The password needs 8 to 63 characters.
-# Leave the password blank and the mixer makes one up on its first start and writes it here.
+# Leave it blank (or type one it cannot use) and the mixer makes one up at start-up and writes it here.
 WIFI_NAME=CampMixer
 WIFI_PASSWORD=
 # Band is 2.4 or 5. 2.4 reaches further. Channels: 1 to 13 on 2.4; 36, 40, 44, 48 or 149 to 165 on 5.
@@ -29,6 +29,7 @@ JOIN_WIFI_4_PASSWORD=
 
 # ---- Which radio ----
 # auto     the USB Wi-Fi adaptor if it is plugged in at start-up, otherwise the Pi's built-in radio
+#          ("campmixer status" says which one is in use)
 # usb      only the USB adaptor
 # onboard  only the Pi's built-in radio
 WIFI_RADIO=auto
@@ -36,5 +37,6 @@ WIFI_RADIO=auto
 # ---- Login over SSH (CampMixer OS image only) ----
 # The account is "mixer":  ssh mixer@mixer.local
 # Put a password of 8 or more characters here before the first start. It is set, then removed from this file.
-# Leave it blank and the mixer makes one up on its first start and writes it here for you to read.
+# Leave it blank (or shorter than 8) and the mixer makes one up on its first start and writes it here to read.
+# The same password is asked for by "sudo".
 LOGIN_PASSWORD=

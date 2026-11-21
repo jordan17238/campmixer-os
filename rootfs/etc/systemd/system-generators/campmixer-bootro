@@ -1,0 +1,30 @@
+#!/bin/sh
+# systemd generator, run at the very start of every start-up.
+#
+# While the card is locked (the system is running on overlayroot's layer in memory) the boot partition is
+# mounted read-only as well, so nothing on the card is open for writing. Being locked is decided by one
+# word in cmdline.txt and nothing else: /etc/fstab is never edited, so the two cannot disagree.
+#
+# CAMPMIXER_MOUNTS and CAMPMIXER_FSTAB point the tests at pretend files.
+set -eu
+
+out="${1:-/run/systemd/generator}"
+mounts="${CAMPMIXER_MOUNTS:-/proc/mounts}"
+fstab="${CAMPMIXER_FSTAB:-/etc/fstab}"
+
+# Locked means / really is the overlay, whatever was asked for.
+[ "$(awk '$2 == "/" { type = $3 } END { print type }' "$mounts" 2>/dev/null || true)" = overlay ] || exit 0
+
+# The options the boot partition has in fstab (overlayroot keeps that line as it was).
+options="$(awk '$1 !~ /^#/ && $2 == "/boot/firmware" { print $4; exit }' "$fstab" 2>/dev/null || true)"
+[ -n "$options" ] || exit 0
+case ",$options," in
+*,ro,*) exit 0 ;;
+esac
+
+mkdir -p "$out/boot-firmware.mount.d"
+cat >"$out/boot-firmware.mount.d/50-campmixer-ro.conf" <<CONF
+# Written at start-up by /etc/systemd/system-generators/campmixer-bootro: the card is locked.
+[Mount]
+Options=$options,ro
+CONF

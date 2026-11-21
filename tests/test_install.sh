@@ -63,7 +63,10 @@ done <<'EOF'
 644 opt/campmixer/campmixer_link.py
 644 opt/campmixer/VERSION
 644 opt/campmixer/www/index.html
-755 usr/local/sbin/campmixer
+755 usr/local/bin/campmixer
+755 etc/systemd/system-generators/campmixer-bootro
+755 etc/initramfs-tools/scripts/init-premount/campmixer-nofsck
+644 etc/systemd/system/systemd-remount-fs.service.d/10-campmixer-overlay.conf
 644 etc/systemd/system/campmixer-bridge.service
 644 etc/systemd/system/campmixer-netconf.service
 644 etc/systemd/system/campmixer-radio.service
@@ -84,11 +87,16 @@ grep -qxF "psk=$password" "$root/etc/NetworkManager/system-connections/campmixer
 	fail "the access point does not use the password in campmixer.txt"
 grep -q "Own Wi-Fi password: $password" "$root/install.log" || fail "the installer did not show the password"
 
-# ---- running it again changes nothing
+# ---- running it again changes nothing, and clears out the command's old place
+mkdir -p "$root/usr/local/sbin"
+echo old >"$root/usr/local/sbin/campmixer"
 before="$(cat "$config" "$root/boot/firmware/cmdline.txt" "$settings" "$root/etc/hosts" | sha256sum)"
 install_into "$root"
 after="$(cat "$config" "$root/boot/firmware/cmdline.txt" "$settings" "$root/etc/hosts" | sha256sum)"
 [ "$before" = "$after" ] || fail "a second run changed the boot files"
+[ ! -e "$root/usr/local/sbin/campmixer" ] || fail "the old copy of the command was left behind"
+grep -q 'ExecStart=/usr/local/bin/campmixer firststart' "$root/etc/systemd/system/campmixer-firststart.service" ||
+	fail "the first-start unit does not point at the command"
 
 # ---- a card that has been started once, set up for another country, with its own settings file
 used="$(make_root "console=serial0,115200 console=tty1 root=PARTUUID=4d3ee428-02 rootfstype=ext4 fsck.repair=yes rootwait quiet cfg80211.ieee80211_regdom=GB")"

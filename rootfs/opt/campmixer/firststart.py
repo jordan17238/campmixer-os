@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """CampMixer first start, for a freshly written image.
 
-The image has no passwords in it. On its first start this:
-  * sets the login password from LOGIN_PASSWORD in campmixer.txt, or makes one up;
-  * makes up a Wi-Fi password if WIFI_PASSWORD is blank or unusable;
-  * writes whatever it made up back into campmixer.txt, so it can be read with the card in a computer.
+The image has no passwords in it. On its first start this sets the login password from LOGIN_PASSWORD in
+campmixer.txt, or makes one up and writes it into that file, where it can be read with the card in a computer.
 A login password you chose yourself is removed from the file once it is set.
+
+(The Wi-Fi password is looked after by netconf.py at every start-up: a blank or unusable one is made up there.)
 """
 import os
 import pwd
-import secrets
 import subprocess
 import sys
 from pathlib import Path
@@ -19,11 +18,6 @@ import netconf  # noqa: E402
 
 CHPASSWD = os.environ.get("CAMPMIXER_CHPASSWD", "chpasswd")
 LOGIN_DONE = netconf.ROOT / "var/lib/campmixer/login-password-set"
-LETTERS = "abcdefghjkmnpqrstuvwxyz23456789"  # none that look alike
-
-
-def make_password():
-    return "-".join("".join(secrets.choice(LETTERS) for _ in range(4)) for _ in range(3))
 
 
 def login_user():
@@ -46,17 +40,13 @@ def main():
         raw = {}
     changes = {}
 
-    if not netconf.valid_passphrase(raw.get("WIFI_PASSWORD", "")):
-        changes["WIFI_PASSWORD"] = make_password()
-        netconf.log("made up a Wi-Fi password; it is in campmixer.txt")
-
     if not LOGIN_DONE.exists():
         user = login_user()
         if user is None:
             netconf.log("no login account found")
             return 1
         chosen = raw.get("LOGIN_PASSWORD", "")
-        password = chosen if usable_login_password(chosen) else make_password()
+        password = chosen if usable_login_password(chosen) else netconf.make_password()
         done = subprocess.run([CHPASSWD], input="%s:%s\n" % (user, password), text=True, capture_output=True)
         if done.returncode != 0:
             netconf.log("could not set the login password for %s: %s" % (user, done.stderr.strip()))

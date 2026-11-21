@@ -1,6 +1,6 @@
-
 CampMixer OS, built on Raspberry Pi OS.
 
   campmixer status    what this Pi is doing
   campmixer           every command
 
+Changes need sudo, which asks for your login password.

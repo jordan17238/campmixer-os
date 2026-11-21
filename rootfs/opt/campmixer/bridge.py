@@ -239,6 +239,20 @@ class Client:
             self.open = False
 
 
+def root_is_overlay(mounts="/proc/self/mounts"):
+    """True when the card is locked: the system is running on a layer in memory over a read-only card."""
+    locked = False
+    try:
+        with open(mounts) as handle:
+            for line in handle:
+                fields = line.split()
+                if len(fields) >= 3 and fields[1] == "/":
+                    locked = fields[2] == "overlay"  # the last mount on / is the one in use
+    except OSError:
+        pass
+    return locked
+
+
 class Bridge:
     def __init__(self, loop, args):
         self.loop = loop
@@ -249,10 +263,7 @@ class Bridge:
         self.network = {"addresses": [], "wifi": None}
         version_file = Path(__file__).resolve().parent / "VERSION"
         self.version = version_file.read_text().strip() if version_file.is_file() else "dev"
-        try:
-            self.locked = "overlayroot=tmpfs" in Path("/proc/cmdline").read_text()
-        except OSError:
-            self.locked = False
+        self.locked = root_is_overlay()
 
     # ----- serial side -----
 
