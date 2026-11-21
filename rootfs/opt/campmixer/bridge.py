@@ -409,6 +409,8 @@ class Bridge:
             self.auth = None
         if self.auth is None:
             LOG.warning("no PIN is set up (%s), so nobody can sign in", self.auth_path)
+        else:
+            self.throttle.set_limit(self.auth.limit)  # a short PIN comes with a stricter allowance of wrong tries
         if before is not None and (self.auth is None or self.auth.session_key != before):
             LOG.info("the PIN has changed: everyone is signed out")
             for client in list(self.clients):

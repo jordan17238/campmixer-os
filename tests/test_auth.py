@@ -12,25 +12,37 @@ import campmixer_auth as auth  # noqa: E402
 # --- which PINs are allowed
 for weak in ("000000", "111111", "999999", "123456", "234567", "654321", "987654", "890123", "135791", "024680", "975319",
              "121212", "123123", "112233", "121212", "696969", "159753", "147258", "789456", "123321", "314159",
-             "12345678", "87654321", "00000000", "12341234", "11223344", "12121212", "123123123", "123456789012"):
+             "12345678", "87654321", "00000000", "12341234", "11223344", "12121212", "123123123", "123456789012",
+             "1234", "4321", "0000", "1111", "9999", "1212", "6969", "1122", "2468", "1357", "9876", "0123", "2580", "0852", "1004",
+             "1987", "1999", "2000", "2024", "2026", "1900", "2099", "12345", "54321", "11111", "13579"):
     assert auth.weak_pin(weak), weak
     assert auth.pin_problem(weak) == "is one of the first a stranger would try", weak
-for fine in ("482719", "305918", "48271935", "90517362", "663104", "700214", "281746593021"):
+for fine in ("482719", "305918", "48271935", "90517362", "663104", "700214", "281746593021", "4827", "9051", "7305", "0394", "3187",
+             "63104", "40718"):
     assert not auth.weak_pin(fine) and auth.pin_problem(fine) is None, fine
-for not_a_pin in ("", "1", "12345", "1234567890123", "48271x", "482 719", "-482719", "+482719", "4827.19", "４８２７１９３５",
-                  "٤٨٢٧١٩٣٥", "48271935\n", None, 48271935, b"48271935", ["48271935"]):
-    assert auth.pin_problem(not_a_pin) == "must be 6 to 12 digits", repr(not_a_pin)
+for not_a_pin in ("", "1", "123", "482", "1234567890123", "48271x", "482 719", "-482719", "+482719", "4827.19", "４８２７１９３５",
+                  "٤٨٢٧١٩٣٥", "48271935\n", "４８２７", None, 48271935, 4827, b"48271935", ["48271935"]):
+    assert auth.pin_problem(not_a_pin) == "must be 4 to 12 digits", repr(not_a_pin)
 assert auth.tidy_pin(" 4827 1935 ") == "48271935" and auth.tidy_pin("4827-1935") == "48271935"
 made = {auth.make_pin() for _ in range(2000)}
 assert len(made) > 1990 and all(len(pin) == 8 and auth.pin_problem(pin) is None for pin in made)
 # The rules must not eat the space they protect: of a million six-digit PINs, nearly all stay usable.
 refused = sum(auth.weak_pin("%06d" % n) for n in range(10**6))
 assert 1000 < refused < 3000, refused
+refused = sum(auth.weak_pin("%04d" % n) for n in range(10**4))
+assert 400 < refused < 600, refused  # of ten thousand four-digit PINs, about one in twenty is turned down
 
 # --- the hash and the cookies
 key_a, key_b = secrets.token_bytes(32), secrets.token_bytes(32)
 record = auth.derive(key_a, "48271935")
-assert set(record) == {"v", "salt", "n", "r", "p", "hash", "session_key"}
+assert set(record) == {"v", "budget", "refill_s", "salt", "n", "r", "p", "hash", "session_key"}
+# The allowance of wrong tries comes with the PIN: about 500 a day for six digits and up, about 100 for four or five.
+assert (record["budget"], record["refill_s"]) == (20, 180) and auth.derive(key_a, "482719")["budget"] == 20
+short = auth.derive(key_a, "4827")
+assert (short["budget"], short["refill_s"]) == (10, 900) and auth.derive(key_a, "63104")["budget"] == 10
+assert auth.Verifier(short).limit == (10, 900) and auth.Verifier(record).limit == (20, 180)
+assert auth.Verifier(short).check_pin("4827") and not auth.Verifier(short).check_pin("4828")
+assert auth.Verifier({k: v for k, v in record.items() if k not in ("budget", "refill_s")}).limit == (20, 180)
 assert "48271935" not in json.dumps(record) and key_a.hex() not in json.dumps(record)
 assert auth.derive(key_a, "48271935") == record  # the same from one start-up to the next
 check = auth.Verifier(json.loads(json.dumps(record)))
@@ -38,7 +50,7 @@ assert check.check_pin("48271935")
 for wrong in ("48271936", "4827193", "482719350", "", "0", "x" * 8, "48271935 ", " 48271935", "４８２７１９３５", None, 48271935, b"48271935",
               ["48271935"], {"pin": "48271935"}, "48271935\x00", "9" * 5000):
     assert check.check_pin(wrong) is False, repr(wrong)
-for bad_key, bad_pin in ((b"short", "48271935"), (key_a, "123456"), (key_a, "12"), (key_a + b"x", "48271935")):
+for bad_key, bad_pin in ((b"short", "48271935"), (key_a, "123456"), (key_a, "12"), (key_a, "123"), (key_a, "1234"), (key_a + b"x", "48271935")):
     try:
         auth.derive(bad_key, bad_pin)
         raise AssertionError("derive accepted %r %r" % (bad_key, bad_pin))
@@ -72,7 +84,8 @@ for cut in range(1, 43):
 
 for nonsense in (None, [], "text", {}, {"v": 2}, dict(record, v=2), dict(record, salt="zz"), dict(record, salt="00"), dict(record, hash="00"),
                  dict(record, session_key="00" * 31), dict(record, n=3), dict(record, n=2**20), dict(record, n=0), dict(record, r=0),
-                 dict(record, p=99), dict(record, n="many"), {k: v for k, v in record.items() if k != "hash"}):
+                 dict(record, p=99), dict(record, n="many"), {k: v for k, v in record.items() if k != "hash"},
+                 dict(record, budget=0), dict(record, budget=5000), dict(record, refill_s=1), dict(record, budget="lots")):
     try:
         auth.Verifier(nonsense)
         raise AssertionError("accepted %r" % (nonsense,))
@@ -171,6 +184,42 @@ while clock.now - start < 86400:
     tries += 1
 assert tries < 300, tries
 
+# --- a short PIN's allowance: ten wrong tries for everyone together, then one every quarter of an hour
+clock.now += 10 * 3600
+limit = auth.Throttle(clock, auth.SHORT_LIMIT)
+for n in range(10):
+    assert limit.wait("address-%d" % n) == 0
+    limit.spend("address-%d" % n)
+assert 899 < limit.wait("address-new") <= 900
+clock.now += 900
+assert limit.wait("address-new") == 0
+limit.spend("address-new")
+assert limit.wait("yet-another") > 899
+clock.now += 10 * 3600
+limit = auth.Throttle(clock, auth.SHORT_LIMIT)
+start, tries = clock.now, 0
+while clock.now - start < 86400:
+    name = "bot-%d" % tries
+    wait = limit.wait(name)
+    if wait > 0:
+        clock.now += wait
+        continue
+    limit.spend(name)
+    tries += 1
+assert 96 <= tries <= 107, tries  # against some 9,500 usable four-digit PINs: about a one-in-a-hundred chance a day
+# Changing the PIN to a short one tightens the allowance at once, and what was in hand does not carry over.
+clock.now += 10 * 3600
+limit = auth.Throttle(clock)
+for n in range(3):
+    limit.spend("a-%d" % n)
+limit.set_limit(auth.SHORT_LIMIT)
+assert limit.budget == 10 and limit.wrong_total == 3
+for n in range(10):
+    limit.spend("b-%d" % n)
+assert limit.wait("c") > 899
+limit.set_limit(auth.LIMIT)  # and back to a long one: nothing is handed out, it only comes back faster
+assert 179 < limit.wait("c") <= 180
+
 # --- the record that outlives a restart of the bridge
 clock.now += 10 * 3600
 limit = auth.Throttle(clock)
@@ -188,7 +237,11 @@ for _ in range(4):
     again.spend("fresh")
 assert again.wait("fresh") > 0  # the shared budget was carried over as well: 16 + 4 used
 
-for nonsense in (None, [], {}, {"v": 2}, dict(saved, budget="lots"), dict(saved, budget=-1), dict(saved, budget=99), dict(saved, wrong_total=-5),
+assert saved["limit"] == [20, 180]
+strict = auth.Throttle(clock, auth.SHORT_LIMIT)  # a record written under the looser allowance, read under the strict one
+strict.restore(dict(saved, budget=18.5))
+assert strict.budget == 10 and strict.wrong_total == 16
+for nonsense in (None, [], {}, {"v": 2}, dict(saved, budget="lots"), dict(saved, budget=-1), dict(saved, budget=999), dict(saved, wrong_total=-5),
                  dict(saved, sources=[]), dict(saved, sources={"x": [0, 1, 2]}), dict(saved, sources={"x": "y"}), dict(saved, budget_time=-1)):
     fresh = auth.Throttle(clock)
     try:

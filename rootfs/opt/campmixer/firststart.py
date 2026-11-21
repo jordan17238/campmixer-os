@@ -34,12 +34,13 @@ def login_user():
 # The login opens the whole Pi, over the network. These are what anyone guessing tries first.
 OBVIOUS = frozenset(
     "password passwort raspberry raspberrypi campmixer mixer pi admin root user login welcome letmein changeme "
-    "qwerty qwertyui qwertyuiop asdfghjk iloveyou secret default".split()
+    "qwerty qwertyui qwertyuiop asdfghjk iloveyou secret default pass test abcd asdf qwer zxcv love camp".split()
 )
 
 
 def usable_login_password(password):
-    if not 8 <= len(password) <= 127 or not all(32 <= ord(ch) <= 126 for ch in password):
+    # Four characters is the least that is taken. That short, it is only as safe as the network the mixer is on.
+    if not 4 <= len(password) <= 127 or not all(32 <= ord(ch) <= 126 for ch in password):
         return False
     core = password.lower().strip("0123456789 !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")
     if core in OBVIOUS:

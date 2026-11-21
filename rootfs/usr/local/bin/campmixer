@@ -9,12 +9,13 @@ APP=/opt/campmixer
 BOOT=/boot/firmware
 NETCONF="$APP/netconf.py"
 VERSION="$(cat "$APP/VERSION" 2>/dev/null || echo unknown)"
+REPO="https://github.com/jordan17238/campmixer-os"
 
 usage() {
 	cat <<'EOF'
 campmixer status                        what the Pi is doing right now
 campmixer pin                           the PIN the web app asks for
-campmixer pin NEW                       change it (6 to 12 digits); every phone has to sign in again
+campmixer pin NEW                       change it (4 to 12 digits); every phone has to sign in again
 campmixer pin --new                     change it to a made-up one
 campmixer wifi                          Wi-Fi settings in use, with the passwords
 campmixer wifi own --name NAME --password PASSWORD [--band 2.4|5] [--channel N]
@@ -24,6 +25,7 @@ campmixer wifi forget NAME              stop joining it
 campmixer password                      change your login password (card must be unlocked)
 campmixer lock                          make the card read-only, so the power can be pulled at any time
 campmixer unlock                        make the card writable again, for changes and updates
+campmixer update                        put the newest CampMixer OS over this one (unlocked card, internet needed)
 campmixer logs                          recent messages from the CampMixer services
 campmixer version
 
@@ -235,6 +237,53 @@ cmd_unlock() {
 	echo "Unlocked from the next start. Restart now with: sudo reboot"
 }
 
+cmd_update() {
+	# Puts the newest published CampMixer OS over this one, in place, with the same installer that builds the
+	# image. Settings, passwords, the PIN and signed-in phones are kept.
+	local again=0 url tag="" newest work installer status
+	[ "${1:-}" != "--again" ] || again=1
+	need_root
+	if locked_now; then
+		die "The card is locked, so an update would be gone at the next start. Run 'sudo campmixer unlock', restart, then this again."
+	fi
+	if [ -n "${CAMPMIXER_UPDATE_URL:-}" ]; then
+		url="$CAMPMIXER_UPDATE_URL" # for testing: a copy of the kit from anywhere curl can read
+	else
+		# Only what has been published under Releases is installed: that is what passed the checks and built.
+		tag="$(curl -fsSL -o /dev/null -w '%{url_effective}' --max-time 60 "$REPO/releases/latest" 2>/dev/null)" ||
+			die "Could not reach GitHub. This needs a network with internet access: Ethernet, or a Wi-Fi network the mixer has joined."
+		tag="${tag##*/}"
+		case "$tag" in
+		v[0-9]*-build[0-9]*) ;;
+		*) die "Could not work out the newest version from GitHub." ;;
+		esac
+		newest="${tag#v}"
+		newest="${newest%-build*}"
+		if [ "$newest" = "$VERSION" ] && [ "$again" -eq 0 ]; then
+			echo "CampMixer OS $VERSION is the newest. Nothing to do."
+			echo "(To install it over itself anyway: sudo campmixer update --again)"
+			return 0
+		fi
+		url="$REPO/archive/refs/tags/$tag.tar.gz"
+	fi
+	work="$(mktemp -d)" || die "Could not make a folder to work in."
+	echo "Fetching ${tag:-the update}..."
+	if ! curl -fsSL --max-time 600 "$url" | tar -xz -C "$work"; then
+		rm -rf "$work"
+		die "Could not fetch the update. Nothing was changed."
+	fi
+	installer="$(find "$work" -maxdepth 2 -name install.sh | head -n1)"
+	if [ -z "$installer" ] || [ ! -f "$(dirname "$installer")/rootfs/opt/campmixer/bridge.py" ]; then
+		rm -rf "$work"
+		die "What was fetched is not CampMixer OS. Nothing was changed."
+	fi
+	echo "Installing CampMixer OS $(cat "$(dirname "$installer")/VERSION" 2>/dev/null) over $VERSION"
+	bash "$installer"
+	status=$?
+	rm -rf "$work"
+	return "$status"
+}
+
 cmd_firststart() {
 	# Runs once, on the first start of a freshly written image. That start has to write to the card
 	# (it grows the file system, makes the SSH keys and sets the passwords). Every later one must not.
@@ -296,6 +345,10 @@ lock)
 	;;
 unlock)
 	cmd_unlock
+	;;
+update)
+	shift
+	cmd_update "$@"
 	;;
 logs)
 	journalctl -b --no-pager -n 120 -u campmixer-firststart.service -u campmixer-netconf.service -u campmixer-radio.service -u campmixer-bridge.service

@@ -316,7 +316,7 @@ async def main():
         for almost in ("4827193", "482719355", "48271934"):
             assert sign_in(almost)[0] == 403, almost
         assert wrong_pins() == 4
-        for slip in ("", "0000000048271935", "48271935a", "４８２７１９３５", "4827", "pin", "48271935; DROP", " "):
+        for slip in ("", "0000000048271935", "48271935a", "４８２７１９３５", "482", "pin", "48271935; DROP", " "):
             assert sign_in(slip)[0] == 403, slip
         assert wrong_pins() == 4  # not PINs at all: they cannot be right, and are not held against anyone
         code, answer, cookie = sign_in("4827 1935")  # typed with a space, as it is easier to read
@@ -478,6 +478,23 @@ async def main():
         os.replace(AUTH_FILE + ".away", AUTH_FILE)
         time.sleep(1.5)
         assert with_cookie(cookie) == 200 and wrong_pins() == 10
+
+        # --- a four-digit PIN works, and brings its stricter allowance of wrong tries with it
+        with open(STATE_FILE) as handle:
+            assert json.load(handle)["limit"] == [20, 180]
+        write_auth("4827")
+        time.sleep(1.5)
+        assert with_cookie(cookie) == 401  # the PIN changed: signed out
+        assert sign_in("4828", BASE)[0] == 403 and wrong_pins() == 11
+        with open(STATE_FILE) as handle:
+            record = json.load(handle)
+        assert record["limit"] == [10, 900] and record["budget"] <= 9.01, record
+        code, _answer, short_cookie = sign_in("4827", BASE)
+        assert code == 200 and with_cookie(short_cookie, base=BASE) == 200
+        write_auth(NEW_PIN)
+        time.sleep(1.5)
+        code, _answer, cookie = sign_in(NEW_PIN, BASE)
+        assert code == 200 and with_cookie(cookie) == 200 and with_cookie(short_cookie) == 401
 
         # --- someone holding many connections open gets no more than their share, and the rest carry on
         held = []

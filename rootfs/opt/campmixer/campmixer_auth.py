@@ -24,8 +24,13 @@ import json
 import secrets
 import time
 
-PIN_MIN, PIN_MAX = 6, 12
-MADE_UP_DIGITS = 8  # typed once per phone, so the extra two digits cost little and make guessing 100 times harder
+PIN_MIN, PIN_MAX = 4, 12
+MADE_UP_DIGITS = 8  # typed once per phone, so the extra digits cost little and make guessing far harder
+# How much guessing is allowed, for everyone together: (wrong tries in hand, seconds for one to come back).
+# A PIN of fewer than six digits has so few possibilities that it gets a far stricter allowance.
+SHORT_PIN = 6
+LIMIT = (20, 180)  # about 500 wrong PINs a day at most
+SHORT_LIMIT = (10, 900)  # about 100 a day at most
 COOKIE = "campmixer"
 # About a tenth of a second and 16 MB on a Pi 4 for every PIN checked, whoever is asking.
 SCRYPT = {"n": 2**14, "r": 8, "p": 1}
@@ -33,6 +38,7 @@ SCRYPT_MAXMEM = 64 * 1024 * 1024
 
 # Well-known PINs that the pattern rules in weak_pin() do not already catch.
 COMMON_PINS = frozenset(
+    "1004 2580 0852 5683 0007 1379 9731 1230 3141 2718 1236 7410 0258 "
     "123321 111222 112358 314159 271828 123654 654123 147258 258369 369258 147852 159753 951753 753951 "
     "789456 456123 321654 102030 010203 100200 123789 789123 999000 000999 124578 235689 134679 "
     "159357 357159 142536 963852 852963 741852 852456 258456 696969 420420 123450 012340 100000 200000 "
@@ -50,7 +56,14 @@ def weak_pin(pin):
             return True  # a short block repeated: 121212, 123123, 12341234
     if len(pin) % 2 == 0 and pin[::2] == pin[1::2]:
         return True  # every digit doubled: 112233
+    if len(pin) == 4 and pin[:2] in ("19", "20"):
+        return True  # a year: the first thing tried against a four-digit PIN
     return pin in COMMON_PINS
+
+
+def guess_limit(pin):
+    """The allowance of wrong tries that goes with this PIN: stricter for a short one."""
+    return SHORT_LIMIT if len(pin) < SHORT_PIN else LIMIT
 
 
 def tidy_pin(text):
@@ -105,8 +118,11 @@ def derive(web_key, pin):
         raise ValueError("need a 32-byte key and a usable PIN")
     salt = _mac(web_key, b"campmixer pin salt")[:16]
     pin_hash = hashlib.scrypt(pin.encode("ascii"), salt=salt, dklen=32, maxmem=SCRYPT_MAXMEM, **SCRYPT)
+    budget, refill_s = guess_limit(pin)
     return {
         "v": 1,
+        "budget": budget,
+        "refill_s": refill_s,
         "salt": salt.hex(),
         "n": SCRYPT["n"],
         "r": SCRYPT["r"],
@@ -126,8 +142,10 @@ class Verifier:
         self.hash = bytes.fromhex(data["hash"])
         self.session_key = bytes.fromhex(data["session_key"])
         self.params = {name: int(data[name]) for name in ("n", "r", "p")}
+        self.limit = (int(data.get("budget", LIMIT[0])), int(data.get("refill_s", LIMIT[1])))
         n, r, p = self.params["n"], self.params["r"], self.params["p"]
         sane = len(self.salt) >= 8 and len(self.hash) == 32 and len(self.session_key) == 32
+        sane = sane and 1 <= self.limit[0] <= 100 and 30 <= self.limit[1] <= 86400
         sane = sane and 2**10 <= n <= 2**16 and n & (n - 1) == 0 and 1 <= r <= 16 and 1 <= p <= 4
         sane = sane and 128 * n * r * p <= SCRYPT_MAXMEM // 2
         if not sane:
@@ -177,6 +195,11 @@ class Throttle:
     PINs a day at the very most. Against the 100 million eight-digit PINs that is centuries of guessing, and
     against the million six-digit ones a few years.
 
+    A PIN of four or five digits has too few possibilities for that, so with one the budget is 10 wrong tries
+    and one comes back every quarter of an hour: about 100 a day. Against the ten thousand four-digit PINs
+    that is still a one-in-a-hundred chance for every day someone spends at it, which is the price of a
+    short PIN. (Which allowance applies comes with the PIN's hash, from netconf.py.)
+
     While either limit says wait, a try is turned away without the PIN being looked at. A try is counted as
     wrong before it is checked and taken off again only if it turns out right, so one that is cut short
     half-way still counts.
@@ -188,16 +211,22 @@ class Throttle:
     FREE_TRIES = 5
     SOURCE_WAITS = (30, 60, 120, 300)
     SOURCE_MEMORY_S = 900
-    BUDGET = 20
-    REFILL_S = 180
+    BUDGET, REFILL_S = LIMIT
     MAX_SOURCES = 512
 
-    def __init__(self, clock=time.monotonic):
+    def __init__(self, clock=time.monotonic, limit=LIMIT):
         self.clock = clock
         self.sources = {}  # address -> [wrong tries, time of the last one, may try again at]
+        self.BUDGET, self.REFILL_S = limit
         self.budget = float(self.BUDGET)
         self.budget_time = clock()
         self.wrong_total = 0
+
+    def set_limit(self, limit):
+        """Switch to another allowance (the PIN changed). What is in hand is kept, down to the new most."""
+        self._refill(self.clock())
+        self.BUDGET, self.REFILL_S = limit
+        self.budget = min(self.budget, float(self.BUDGET))
 
     def _refill(self, now):
         if now > self.budget_time:
@@ -242,6 +271,7 @@ class Throttle:
     def dump(self):
         return {
             "v": 1,
+            "limit": [self.BUDGET, self.REFILL_S],  # for whoever reads the file; restore() does not use it
             "budget": round(self.budget, 4),
             "budget_time": round(self.budget_time, 3),
             "wrong_total": self.wrong_total,
@@ -254,8 +284,9 @@ class Throttle:
         if not isinstance(data, dict) or data.get("v") != 1:
             raise ValueError("not a record this bridge understands")
         budget, budget_time, wrong_total = float(data["budget"]), float(data["budget_time"]), int(data["wrong_total"])
-        if not (0.0 <= budget <= self.BUDGET and budget_time >= 0.0 and wrong_total >= 0):
+        if not (0.0 <= budget <= 100.0 and budget_time >= 0.0 and wrong_total >= 0):
             raise ValueError("the record holds values that make no sense")
+        budget = min(budget, float(self.BUDGET))  # the allowance may have become stricter since it was written
         sources = {}
         for name, entry in list(data["sources"].items())[: self.MAX_SOURCES]:
             count, last, until = int(entry[0]), float(entry[1]), float(entry[2])

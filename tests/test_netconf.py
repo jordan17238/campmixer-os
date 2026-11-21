@@ -304,10 +304,12 @@ for refused, reason in (
     (["WIFI_CHANNEL=36"], "WIFI_CHANNEL 36 is not a 2.4 GHz channel."),
     (["WIFI_RADIO=both"], "WIFI_RADIO must be auto, usb or onboard."),
     (["JOIN_WIFI_1_PASSWORD=short"], "JOIN_WIFI_1_PASSWORD must be 8 to 63 characters, or blank."),
-    (["WEB_PIN=12345"], "WEB_PIN must be 6 to 12 digits."),
-    (["WEB_PIN="], "WEB_PIN must be 6 to 12 digits."),
-    (["WEB_PIN=4827193x"], "WEB_PIN must be 6 to 12 digits."),
+    (["WEB_PIN=123"], "WEB_PIN must be 4 to 12 digits."),
+    (["WEB_PIN="], "WEB_PIN must be 4 to 12 digits."),
+    (["WEB_PIN=4827193x"], "WEB_PIN must be 4 to 12 digits."),
     (["WEB_PIN=123456"], "WEB_PIN is one of the first a stranger would try."),
+    (["WEB_PIN=1234"], "WEB_PIN is one of the first a stranger would try."),
+    (["WEB_PIN=1987"], "WEB_PIN is one of the first a stranger would try."),
 ):
     done = run(edit, "set", *refused)
     assert done.returncode == 2 and "Not changed: " + reason in done.stderr, (refused, done.stderr)
@@ -371,8 +373,9 @@ assert changed.check_pin("90517362") and not changed.check_pin(pin)
 assert not changed.token_ok(token)  # changing the PIN signs every phone out
 assert open(key_file).read() == key
 before = settings_file(pins)
-for refused, reason in ((["123456"], "one of the first"), (["111111"], "one of the first"), (["12345"], "6 to 12 digits"),
-                        (["1234567890123"], "6 to 12 digits"), (["48271x35"], "6 to 12 digits"), ([""], "6 to 12 digits")):
+for refused, reason in ((["123456"], "one of the first"), (["111111"], "one of the first"), (["12345"], "one of the first"),
+                        (["1234"], "one of the first"), (["2024"], "one of the first"), (["123"], "4 to 12 digits"),
+                        (["1234567890123"], "4 to 12 digits"), (["48271x35"], "4 to 12 digits"), ([""], "4 to 12 digits")):
     done = run(pins, "pin", *refused)
     assert done.returncode == 2 and "Not changed: the PIN" in done.stderr and reason in done.stderr, (refused, done.stderr)
     assert settings_file(pins) == before and campmixer_auth.Verifier(auth_file(pins)).check_pin("90517362")
@@ -381,10 +384,17 @@ fresh = re.search(r"The PIN is now (\d{8})\.", done.stdout)
 assert done.returncode == 0 and fresh and fresh.group(1) != "90517362", done.stdout + done.stderr
 assert campmixer_auth.Verifier(auth_file(pins)).check_pin(fresh.group(1)) and "WEB_PIN=%s\n" % fresh.group(1) in settings_file(pins)
 assert run(pins, "set", "WEB_PIN=663 104").returncode == 0
-assert campmixer_auth.Verifier(auth_file(pins)).check_pin("663104")
+assert campmixer_auth.Verifier(auth_file(pins)).check_pin("663104") and auth_file(pins)["budget"] == 20
+# Four digits are allowed, and come with the stricter allowance of wrong tries.
+done = run(pins, "pin", "4827")
+assert done.returncode == 0 and "The PIN is now 4827." in done.stdout, done.stdout + done.stderr
+assert "WEB_PIN=4827\n" in settings_file(pins)
+short = auth_file(pins)
+assert (short["budget"], short["refill_s"]) == (10, 900) and campmixer_auth.Verifier(short).check_pin("4827")
+assert run(pins, "apply").returncode == 0 and auth_file(pins) == short and "WEB_PIN=4827\n" in settings_file(pins)  # and it stays
 
 # One that anyone would guess is replaced at start-up, like a blank one. So is one that is not a PIN at all.
-for typed in ("123456", "000000", "1234", "12121212", "hunter2", "１２３４５６７８"):
+for typed in ("123456", "000000", "1234", "1987", "123", "12121212", "hunter2", "１２３４５６７８"):
     weak = make_root("WIFI_PASSWORD=abcd-efgh-jkmn\nWEB_PIN=%s\n# end\n" % typed, [USB])
     done = run(weak, "apply")
     made = re.search(r"^WEB_PIN=(\d{8})$", settings_file(weak), re.M)

@@ -61,10 +61,19 @@ assert "WIFI_PASSWORD=my wifi password\n" in text and "LOGIN_PASSWORD=\n" in tex
 assert read("/chpasswd.log") == "mixer:pa:ss word 123\n"
 assert os.path.exists(root + "/etc/NetworkManager/system-connections/campmixer-join-1.nmconnection")
 
-# A login password that is too short is not used; one is made up instead.
-run, read, root = first_start("WIFI_PASSWORD=long enough\nLOGIN_PASSWORD=short\n")
-assert run().returncode == 0
-assert re.search(r"^LOGIN_PASSWORD=%s$" % MADE_UP, read("/boot/firmware/campmixer.txt"), re.M)
+# A login password that is too short or too obvious is not used; one is made up instead.
+for unusable in ("abc", "1234", "0000", "1987", "pass", "aaaa", "password1", "Mixer2026!"):
+    run, read, root = first_start("WIFI_PASSWORD=long enough\nLOGIN_PASSWORD=%s\n" % unusable)
+    assert run().returncode == 0, unusable
+    made = re.search(r"^LOGIN_PASSWORD=(%s)$" % MADE_UP, read("/boot/firmware/campmixer.txt"), re.M)
+    assert made and read("/chpasswd.log") == "mixer:%s\n" % made.group(1), unusable
+
+# Four characters is the least that is taken: used, then removed from the file like any chosen one.
+for chosen in ("mx47", "j9!k", "4827", "short"):
+    run, read, root = first_start("WIFI_PASSWORD=long enough\nLOGIN_PASSWORD=%s\nWEB_PIN=4827\n" % chosen)
+    assert run().returncode == 0, chosen
+    text = read("/boot/firmware/campmixer.txt")
+    assert read("/chpasswd.log") == "mixer:%s\n" % chosen and "LOGIN_PASSWORD=\n" in text and "WEB_PIN=4827\n" in text, (chosen, text)
 
 # If the password cannot be set, say so and leave everything for another try.
 run, read, root = first_start("WIFI_PASSWORD=long enough\nLOGIN_PASSWORD=\n", chpasswd_fails=True)
