@@ -77,7 +77,7 @@ A SET for a channel or a setting the core does not have, or one that is cut shor
 | Type | Name | Fields | Meaning |
 |---|---|---|---|
 | `0x83` | INFO | version (1 byte, 2), number of inputs (1 byte, at least 1), number of outputs (1 byte, at least 1) | The core's heartbeat: which version it speaks and how many channels it has. |
-| `0x84` | CHANNEL | channel (1 byte), level (2 bytes, signed), flags (1 byte), length of the name (1 byte, at most 16), the name (UTF-8) | Where one channel stands. Flags: bit 0 is mute; bit 1 says the channel's 48 V is on and bit 2 that the channel has a 48 V switch at all (see *48 V*); bit 3 is 0 for now; bits 4 to 7 say which unit the channel is on (see *Linked units*). |
+| `0x84` | CHANNEL | channel (1 byte), level (2 bytes, signed), flags (1 byte), length of the name (1 byte, at most 16), the name (UTF-8) | Where one channel stands. Flags: bit 0 is mute; bit 1 says the channel's 48 V is on and bit 2 that the channel has a 48 V switch at all (see *48 V*); bit 3 is 0 for now; bits 4 to 7 say which box the channel is on (see *An expansion box*). |
 | `0x82` | METERS | one byte for each channel, inputs first, then outputs | The highest level since the last METERS, in half-decibel steps below full scale: 0 is full scale (clipping), 1 is -0.5 dB, 254 is -127 dB, 255 is silence. |
 
 The core sends:
@@ -102,16 +102,15 @@ Phantom power: the 48 volts a mixer sends up a microphone lead to run a condense
 - **The app asks first.** Switched on, 48 V can damage the output of a keyboard, a laptop or a phone. Switched off, it silences a microphone that runs on it. So the app puts a question on the screen before it sends either. A question still on the screen goes away by itself if the core reports that channel's 48 V changing meanwhile, or if the mixer goes out of reach.
 - **Quietly.** Keeping the switch from thumping through the speakers is the core's job, not the app's: the core holds that input silent while the voltage comes up or drains away. The app does not touch the fader or the mute.
 
-## Linked units
+## An expansion box
 
-A main unit can have expansion units chained below it, each the same mixer without a Pi (the design document has the hardware). The Pi never talks to them. The main unit's core answers for the whole chain as one mixer, and it speaks this same protocol to the unit below it, taking the Pi's place: it sends GET_STATE and SET down, and gets INFO, CHANNEL and METERS back. Each expansion unit does the same towards the unit below it.
+A main unit can have one expansion box plugged in (the design document has the hardware). The box has no core of its own. It holds four more microphone preamps, and the main unit's core converts, mixes and answers for all eight inputs. Nothing in this protocol crosses the leads to the box: the core works the box's relays over a small serial link of its own, which is the firmware's business and not the web app's.
 
-- **Numbering.** A core counts its own inputs first, then the inputs of the units below it in chain order, then its own outputs, then theirs. A main unit with one expansion unit is 8 inputs and 2 outputs: inputs 0 to 3 are the main unit's and 4 to 7 the expansion unit's, output 8 is the main unit's and 9 the expansion unit's.
-- **Which unit.** Bits 4 to 7 of a CHANNEL's flags hold the unit the channel is on, counted from the core that is answering: 0 for its own channels. A core that passes a CHANNEL up from below adds 1 to that number, and stops at 15. Names and the other flags (mute, 48 V) are passed up as they are. The web app does not use the unit number yet, so two units' inputs show under one heading.
-- **Coming and going.** When a unit below appears, or has sent no INFO for 3 seconds, the core above sends INFO at once with the new counts, and then a CHANNEL for every channel. The web app redraws its strips whenever the counts change.
-- **A change in flight.** Channel numbers shift when the counts change: with one expansion unit the main output moves from 4 to 8. So after its counts change, a core ignores SET until it has had a GET_STATE, which the web app sends as soon as it sees the new INFO.
-- **Meters.** A core adds the peaks from below to its own METERS message, in the numbering above, using the last ones it received.
-- **Load.** Each lead carries every channel below it, so the table in *How many channels* applies to each lead by itself.
+- **Numbering.** With a box plugged in, the mixer is 8 inputs and 2 outputs: inputs 0 to 3 are the main unit's and 4 to 7 the box's, output 8 is MAIN OUT and output 9 is OUT 2 on the box. Without one it is 4 inputs and 1 output, numbered 0 to 4.
+- **Which box.** Bits 4 to 7 of a CHANNEL's flags say which box the channel's socket is on: 0 for the main unit, 1 for the expansion box. The web app does not use it yet, so both boxes' inputs show under one heading.
+- **Coming and going.** When the box is found, or stops answering the core, the core sends INFO at once with the new counts, and then a CHANNEL for every channel. The web app redraws its strips whenever the counts change.
+- **A change in flight.** Channel numbers shift when the counts change: with a box the main output moves from 4 to 8. So after its counts change, the core ignores SET until it has had a GET_STATE, which the web app sends as soon as it sees the new INFO.
+- **Its switches.** 48 V on the box's inputs is asked for and reported like any other input's: the same setting and the same flags.
 
 ## How many channels
 
