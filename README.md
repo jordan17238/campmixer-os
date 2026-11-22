@@ -7,7 +7,7 @@ This folder is the source for that image.
 
 ## What the OS does
 
-- **Web app at http://mixer.local, behind a PIN.** A fader, a mute button and a level meter for every input and every output the mixer has, however many that is. See *The web app* and *Who can reach it* below.
+- **Web app at http://mixer.local, behind a PIN.** A fader, a mute button and a level meter for every input and every output the mixer has, however many that is, expansion units included. See *The web app* and *Who can reach it* below.
 - **Wi-Fi.** It joins a network you have listed when that network is in range, so the mixer sits on the venue's LAN. Otherwise it makes its own network, `CampMixer`.
 - **Ethernet.** Plug it into any network and it takes an address. A cable straight to a laptop works too, within a few seconds, on a 169.254 address. It keeps asking for a proper address in the background, so a router that starts up after the mixer is still picked up without touching the cable.
 - **SSH** is on: `ssh mixer@mixer.local`.
@@ -230,12 +230,14 @@ The framing on that link, and the messages for volume, mute and meters that the 
 - The real page from the real image in headless Chrome at phone size: sign-in, the faders moving the stand-in core through the emulated serial port and a second phone following, mute, a laptop, the core unplugged, practice mode, the core back, and a PIN change from the command line signing the phone out.
 - With simulated Wi-Fi radios (the Pi kernel includes them): the mixer's own network came up with the made-up password, a simulated phone joined with WPA2, got an address, resolved `mixer.local`, `mixer.lan` and `mixer`, got the sign-in page and nothing else, and signed in with the PIN.
 
-**Since build 4** (versions 0.3.1 to 0.4.1), in the same emulator:
+**Since build 4** (versions 0.3.1 to 0.4.4), in the same emulator:
 
 - Updating in place: build 4, unlocked, was updated to 0.3.1 with the `update` command's own code (the download itself came from a file, since the emulator has no internet), restarted locked as 0.3.1 with its settings, PIN and login intact, and then took a 4-digit PIN with the stricter guess limit in force. That card was later unlocked and updated the same way to 0.4.1, and again came back locked with everything intact.
 - Any number of inputs and outputs, on that 0.4.1 system: headless Chrome signed in to the real page with a stand-in mixer of 48 inputs and 8 outputs on the emulated serial port. All 56 strips were filled in under a second after signing in, the last output was dragged at the bottom of the page and the change reached the core, and over ten seconds 412 messages arrived with none damaged or dropped.
 - A forced easy PIN, on that 0.4.1 system while locked: `pin 1948` was turned down, `pin --force 1948` set it and wrote `ALLOW_EASY_PIN=yes`, and the boot partition was read-only again afterwards. The 34 checks from outside passed with that PIN, this time against a 4-input stand-in speaking version 2 of the protocol. After a restart the PIN was still 1948, start-up had replaced nothing, and the page took 1948 and refused the old PIN.
-- The images of builds 5, 6 and 7 themselves were not started. Their files are the ones tested above: the source download of build 7 was compared with the copy the emulated Pi installed.
+- A freshly flashed image, for the first time since build 4. Build 8 (0.4.2, the first with a standard Wi-Fi password) was checked against its published checksum and started from scratch. Its first start kept the standard Wi-Fi name and password, made up its own PIN, set the login password typed into the settings file, locked the card and restarted, all in 325 s. Locked, it ran its own Wi-Fi on a simulated radio with the standard password. A simulated phone that knew only that password joined with WPA2, got an address, found `mixer.local`, got the sign-in page and nothing else, and signed in with the PIN. `wifi own --password` changed the password on the locked card and back, and left the boot partition read-only.
+- Build 11 (0.4.4) differs from build 8 only in the standard password itself. It was not started: its checksum, its version and the settings file inside the image were checked.
+- The images of builds 5, 6 and 7 themselves were not started. Their files are the ones tested above: the source download of build 7 was compared with the copy the emulated Pi installed. Builds 9 and 10 were stopped before they were published.
 - The serial-link loads in `PROTOCOL.md` are worked out from the message sizes, not measured: the emulated port does not hold data back to 115200 baud.
 
 On builds 2 and 3, and not run again since because that code has not changed:

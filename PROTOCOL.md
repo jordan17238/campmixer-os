@@ -75,7 +75,7 @@ A SET for a channel or a setting the core does not have, or one that is cut shor
 | Type | Name | Fields | Meaning |
 |---|---|---|---|
 | `0x83` | INFO | version (1 byte, 2), number of inputs (1 byte, at least 1), number of outputs (1 byte, at least 1) | The core's heartbeat: which version it speaks and how many channels it has. |
-| `0x84` | CHANNEL | channel (1 byte), level (2 bytes, signed), flags (1 byte), length of the name (1 byte, at most 16), the name (UTF-8) | Where one channel stands. Flags: bit 0 is mute; the other bits are 0 for now. |
+| `0x84` | CHANNEL | channel (1 byte), level (2 bytes, signed), flags (1 byte), length of the name (1 byte, at most 16), the name (UTF-8) | Where one channel stands. Flags: bit 0 is mute; bits 4 to 7 say which unit the channel is on (see *Linked units*); the other bits are 0 for now. |
 | `0x82` | METERS | one byte for each channel, inputs first, then outputs | The highest level since the last METERS, in half-decibel steps below full scale: 0 is full scale (clipping), 1 is -0.5 dB, 254 is -127 dB, 255 is silence. |
 
 The core sends:
@@ -89,6 +89,17 @@ What reaches which output is the core's business in this version: the app sets e
 The app builds a strip for every channel as soon as INFO has told it how many there are, and greys each one until its CHANNEL has arrived. It treats the mixer as out of reach, and greys everything, when the Pi reports the link down or no INFO has arrived for 3.5 seconds.
 
 A receiver ignores any message whose type it does not know, and any message too short for its type. A core that speaks another version says so in INFO's version byte, and an app that does not know that version shows no controls rather than guess.
+
+## Linked units
+
+A main unit can have expansion units chained below it, each the same mixer without a Pi (the design document has the hardware). The Pi never talks to them. The main unit's core answers for the whole chain as one mixer, and it speaks this same protocol to the unit below it, taking the Pi's place: it sends GET_STATE and SET down, and gets INFO, CHANNEL and METERS back. Each expansion unit does the same towards the unit below it.
+
+- **Numbering.** A core counts its own inputs first, then the inputs of the units below it in chain order, then its own outputs, then theirs. A main unit with one expansion unit is 8 inputs and 2 outputs: inputs 0 to 3 are the main unit's and 4 to 7 the expansion unit's, output 8 is the main unit's and 9 the expansion unit's.
+- **Which unit.** Bits 4 to 7 of a CHANNEL's flags hold the unit the channel is on, counted from the core that is answering: 0 for its own channels. A core that passes a CHANNEL up from below adds 1 to that number, and stops at 15. Names are passed up as they are. The web app does not use the unit number yet, so two units' inputs show under one heading.
+- **Coming and going.** When a unit below appears, or has sent no INFO for 3 seconds, the core above sends INFO at once with the new counts, and then a CHANNEL for every channel. The web app redraws its strips whenever the counts change.
+- **A change in flight.** Channel numbers shift when the counts change: with one expansion unit the main output moves from 4 to 8. So after its counts change, a core ignores SET until it has had a GET_STATE, which the web app sends as soon as it sees the new INFO.
+- **Meters.** A core adds the peaks from below to its own METERS message, in the numbering above, using the last ones it received.
+- **Load.** Each lead carries every channel below it, so the table in *How many channels* applies to each lead by itself.
 
 ## How many channels
 
