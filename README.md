@@ -1,4 +1,4 @@
-# CampMixer OS 0.4.1
+# CampMixer OS 0.4.2
 
 Its own operating system for the Camp PA Mixer's Raspberry Pi, built on Raspberry Pi OS Lite (64-bit).
 You write one image to a microSD card and the Pi starts up as the mixer's remote. There is no install step.
@@ -29,12 +29,12 @@ The image is built by Raspberry Pi's own image builder (pi-gen) with one extra s
 
 The image lands in `image/build/pi-gen/deploy/`.
 
-No password is built into the image or into this source, so both are safe to keep anywhere.
+One password is built into the image and into this source: the standard Wi-Fi password, `checkonetwo`, which every CampMixer starts with and which is therefore public. No login password, PIN or key is built in.
 
 ## First start
 
 1. In **Raspberry Pi Imager** choose *Use custom*, pick the `.img.xz` file and write it to the card. Skip the customisation step.
-2. Before the first start: take the card out and put it back in, open `campmixer.txt` on the `bootfs` drive and type in `WIFI_PASSWORD` (8 characters or more), `LOGIN_PASSWORD` (4 or more; longer is safer), `WEB_PIN` (4 to 12 digits), and any networks to join. Doing this now saves pulling the card later to read made-up ones.
+2. Before the first start: take the card out and put it back in, open `campmixer.txt` on the `bootfs` drive and type in `LOGIN_PASSWORD` (4 or more; longer is safer), `WEB_PIN` (4 to 12 digits), any networks to join, and a `WIFI_PASSWORD` of your own (8 characters or more) if the standard one will not do. Doing this now saves pulling the card later to read made-up ones.
 3. Put the card in the Pi and power it. The first start takes about two minutes and restarts itself once (twice if the Pi's own bootloader gets an update): it grows the file system to fill the card, makes its SSH keys, sets the passwords and locks the card.
 4. Open **http://mixer.local** and type the PIN, or log in with `ssh mixer@mixer.local`.
 
@@ -47,7 +47,7 @@ Any password or PIN you left blank is made up on that first start and written in
 `campmixer.txt` on the card's `bootfs` partition. Edit it with the card in a computer, or use the commands below. Changes made in the file take effect at the next start.
 
     WIFI_NAME=CampMixer          the mixer's own network
-    WIFI_PASSWORD=...            8 to 63 characters
+    WIFI_PASSWORD=checkonetwo    8 to 63 characters; every CampMixer starts with this one
     WIFI_BAND=2.4                2.4 or 5
     WIFI_CHANNEL=6
     JOIN_WIFI_1=Church Hall      up to four networks to join when in range
@@ -75,7 +75,7 @@ A phone on the mixer's own network will say it has no internet, because it has n
 
 Save the file as plain text in UTF-8, which is what Notepad and TextEdit do by default now. A file in another encoding is still read, but a name with an accent or a curly apostrophe in it (`Jordan’s iPhone`) will not match the real network, and `campmixer wifi` says so.
 
-There is no built-in Wi-Fi password and no built-in PIN. If `WIFI_PASSWORD` is blank or cannot be used (it needs 8 to 63 characters), the mixer makes one up at start-up and writes it into the file. The same goes for `WEB_PIN` when it is blank, is not 4 to 12 digits, or is one anybody would guess (1234, 1111, 1212, a year such as 1987, 123456 and the like): an 8-digit one is made up. An easy PIN stays only if `ALLOW_EASY_PIN` says `yes` (see *Who can reach it*). The commands refuse a value the mixer could not use, and change nothing.
+Every CampMixer starts with the same Wi-Fi name and password, `CampMixer` and `checkonetwo`, so one sticker and one sentence cover them all. That makes the password public: wherever a stranger joining the mixer's network would matter, change it, in the file or with `sudo campmixer wifi own --password ...`. Two mixers that run within range of each other also need different names, or a phone cannot tell them apart: `sudo campmixer wifi own --name "CampMixer 2"`. If `WIFI_PASSWORD` is blank or cannot be used (it needs 8 to 63 characters), the mixer makes one up at start-up and writes it into the file. There is no built-in PIN: a made-up one also replaces `WEB_PIN` when it is blank, is not 4 to 12 digits, or is one anybody would guess (1234, 1111, 1212, a year such as 1987, 123456 and the like): an 8-digit one is made up. An easy PIN stays only if `ALLOW_EASY_PIN` says `yes` (see *Who can reach it*). The commands refuse a value the mixer could not use, and change nothing.
 
 ## The web app
 
@@ -108,14 +108,14 @@ Not in yet: gain, 48 V, ground lift, high-pass, feedback filter, names and scene
 - The price of that limit: someone who keeps feeding the page wrong PINs can keep *new* phones from signing in (with a short PIN, ten wrong tries are enough to make the next phone wait up to a quarter of an hour). Phones already signed in are not affected.
 - A web site out on the internet cannot reach in through someone's browser: the mixer answers only to its own name (`mixer.local`, `mixer`, `mixer.lan` and the like) or its address, takes a PIN only from its own page, and lets only its own page use the controls.
 
-**What the PIN does not do.** The page is plain `http`, so the PIN and the sign-in cookie cross the network unencrypted. The PIN keeps out everyone who can merely *reach* the page. It does not keep out someone who records the network's traffic at the moment a phone signs in or is in use. On the mixer's own Wi-Fi that takes the Wi-Fi password, so give that only to people you would hand the mixer to. On a venue's network it takes access to their network gear or a deliberate attack on the network. Closing that gap needs `https`, which on a local name means a certificate warning on every phone, so it is left out for now.
+**What the PIN does not do.** The page is plain `http`, so the PIN and the sign-in cookie cross the network unencrypted. The PIN keeps out everyone who can merely *reach* the page. It does not keep out someone who records the network's traffic at the moment a phone signs in or is in use. On the mixer's own Wi-Fi that takes the Wi-Fi password. The standard one is public, so on a mixer that still has it this is open to anyone in range who knows how. Where that matters, change the Wi-Fi password and give the new one only to people you would hand the mixer to. On a venue's network it takes access to their network gear or a deliberate attack on the network. Closing that gap needs `https`, which on a local name means a certificate warning on every phone, so it is left out for now.
 
 **The rest of the Pi.**
 
 - SSH needs the login password, on every network. Root cannot log in. An obvious login password in `campmixer.txt` (`1234`, `password1`, `Mixer2026!`) or one shorter than 4 characters is not used; one is made up instead. A short login password is the weakest door on the mixer, since this login has `sudo`: keep it long on any network you do not control.
 - `campmixer.txt` holds the Wi-Fi password, the PIN and perhaps the login password, so the partition it is on can be read by root only. On the Pi, reading it takes `sudo`. With the card in a computer, anyone holding the card can read it: whoever has the card has the mixer.
 - The part that talks to the network (the bridge) runs as its own user with no rights to anything but the serial port and the network. It never sees the PIN, only a slow hash of it, and cannot read `campmixer.txt`.
-- No password, PIN or key is built into the image or this source. Each card makes up its own on its first start.
+- The standard Wi-Fi password is the one secret built into the image and this source, and it is no secret. No login password, PIN or key is built in: each card makes up its own on its first start.
 
 ## Commands
 
@@ -163,8 +163,8 @@ Reading does not wear a card. The Pi reads the system from the card once at star
 
 Build 4 (0.3.0) has no `update` command yet. To update from it, after the unlock and restart:
 
-    curl -fsSL https://github.com/jordan17238/campmixer-os/archive/refs/tags/v0.4.1-build7.tar.gz | tar xz -C /tmp
-    sudo bash /tmp/campmixer-os-0.4.1-build7/install.sh
+    curl -fsSL https://github.com/jordan17238/campmixer-os/archive/refs/tags/v0.4.2-build8.tar.gz | tar xz -C /tmp
+    sudo bash /tmp/campmixer-os-0.4.2-build8/install.sh
     sudo reboot
 
 Or write the newer image to the card, as for a new one. Copy `campmixer.txt` off the card first and put it back afterwards to keep your settings.
@@ -213,7 +213,7 @@ The framing on that link, and the messages for volume, mute and meters that the 
 - The framing, against the published COBS examples and the CRC check value.
 - Every generated network profile, read back by NetworkManager 1.46's own parser, including awkward names and passwords.
 - The radio's decisions against a scripted stand-in for NetworkManager: start-up, slow joins, looking again when idle, refused networks, drop-outs.
-- The settings file in UTF-8, old Windows encodings and UTF-16, and the rules for passwords and the PIN: nothing built in, unusable values refused, made-up ones saved when the file's are blank or unusable, an easy PIN kept only on the owner's say-so (in the file or with `pin --force`), each card with its own key.
+- The settings file in UTF-8, old Windows encodings and UTF-16, and the rules for passwords and the PIN: nothing built in but the standard Wi-Fi name and password, unusable values refused, made-up ones saved when the file's are blank or unusable, an easy PIN kept only on the owner's say-so (in the file or with `pin --force`), each card with its own key.
 - The first-start password set-up, against a stand-in for the system's password tool.
 - The installer's edits, against the stock Raspberry Pi OS `config.txt` and `cmdline.txt`, for both an image build and a running Pi, and that an image carries no password, PIN or key.
 - The two start-up pieces that follow the lock.

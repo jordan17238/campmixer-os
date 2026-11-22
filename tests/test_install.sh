@@ -89,7 +89,8 @@ done <<'EOF'
 EOF
 
 settings="$root/boot/firmware/campmixer.txt"
-grep -qE '^WIFI_PASSWORD=[a-z2-9]{4}-[a-z2-9]{4}-[a-z2-9]{4}$' "$settings" || fail "no Wi-Fi password was made up"
+# The Wi-Fi password is the standard one that every CampMixer starts with. Nothing is made up in its place.
+grep -qx 'WIFI_PASSWORD=checkonetwo' "$settings" || fail "the standard Wi-Fi password was not kept"
 password="$(sed -n 's/^WIFI_PASSWORD=//p' "$settings")"
 grep -qxF "psk=$password" "$root/etc/NetworkManager/system-connections/campmixer-ap.nmconnection" ||
 	fail "the access point does not use the password in campmixer.txt"
@@ -136,10 +137,13 @@ grep -q ' cfg80211.ieee80211_regdom=NZ$' "$used/boot/firmware/cmdline.txt" || fa
 [ "$(grep -o 'regdom' "$used/boot/firmware/cmdline.txt" | wc -l)" -eq 1 ] || fail "two country settings"
 [ "$(cat "$used/etc/hostname")" = hallmixer ] || fail "hostname override not applied"
 
-# ---- building an image: no password goes in, and the card is marked as not yet started
+# ---- building an image: the standard Wi-Fi password goes in, the one every CampMixer starts with and that is
+# public anyway. Nothing else does, and the card is marked as not yet started.
 img="$(make_root "$STOCK")"
 install_into "$img" CAMPMIXER_IMAGE_BUILD=1
-grep -qx 'WIFI_PASSWORD=' "$img/boot/firmware/campmixer.txt" || fail "an image must not carry a Wi-Fi password"
+grep -qx 'WIFI_NAME=CampMixer' "$img/boot/firmware/campmixer.txt" || fail "the image does not carry the standard Wi-Fi name"
+grep -qx 'WIFI_PASSWORD=checkonetwo' "$img/boot/firmware/campmixer.txt" || fail "the image does not carry the standard Wi-Fi password"
+[ "$(grep -c '^[A-Z_0-9]*PASSWORD=.' "$img/boot/firmware/campmixer.txt")" -eq 1 ] || fail "an image must carry no password but the standard Wi-Fi one"
 grep -qx 'LOGIN_PASSWORD=' "$img/boot/firmware/campmixer.txt" || fail "an image must not carry a login password"
 grep -qx 'WEB_PIN=' "$img/boot/firmware/campmixer.txt" || fail "an image must not carry a PIN"
 # Nor a key: one that everybody can download would let anybody sign their own cookies.
