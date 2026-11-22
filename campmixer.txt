@@ -10,7 +10,7 @@
 # anybody nearby can join the mixer's network until you change it here.
 # Leave it blank (or type one it cannot use) and the mixer makes one up at start-up and writes it here.
 WIFI_NAME=CampMixer
-WIFI_PASSWORD=checkonetwo
+WIFI_PASSWORD=plumzebra37
 # Band is 2.4 or 5. 2.4 reaches further. Channels: 1 to 13 on 2.4; 36, 40, 44, 48 or 149 to 165 on 5.
 WIFI_BAND=2.4
 WIFI_CHANNEL=6

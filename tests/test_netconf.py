@@ -211,17 +211,18 @@ assert made_up and profile(missing, "campmixer-ap")["wifi-security"]["psk"] == m
 # start-up keeps as they are, and no PIN, so that each mixer still makes up its own.
 with open(os.path.join(HERE, "..", "campmixer.txt")) as handle:
     SHIPPED = handle.read()
-assert "\nWIFI_NAME=CampMixer\nWIFI_PASSWORD=checkonetwo\n" in SHIPPED and "\nWEB_PIN=\n" in SHIPPED and "\nLOGIN_PASSWORD=\n" in SHIPPED
+STANDARD = re.search(r"^WIFI_NAME=CampMixer\nWIFI_PASSWORD=([!-~]{8,63})$", SHIPPED, re.M).group(1)
+assert "\nWEB_PIN=\n" in SHIPPED and "\nLOGIN_PASSWORD=\n" in SHIPPED
 pins_made = set()
 for _ in range(2):
     shipped = make_root(SHIPPED, [USB])
     done = run(shipped, "apply")
     assert done.returncode == 0 and "WIFI_PASSWORD was" not in done.stderr and "WEB_PIN was blank" in done.stderr, done.stderr
     ap = profile(shipped, "campmixer-ap")
-    assert ap["wifi"]["ssid"] == "CampMixer" and ap["wifi-security"]["psk"] == "checkonetwo", ap
-    assert "\nWIFI_NAME=CampMixer\nWIFI_PASSWORD=checkonetwo\n" in settings_file(shipped)
+    assert ap["wifi"]["ssid"] == "CampMixer" and ap["wifi-security"]["psk"] == STANDARD, ap
+    assert "\nWIFI_NAME=CampMixer\nWIFI_PASSWORD=%s\n" % STANDARD in settings_file(shipped)
     pins_made.add(re.search(r"^WEB_PIN=(\d{8})$", settings_file(shipped), re.M).group(1))
-    assert run(shipped, "apply").returncode == 0 and profile(shipped, "campmixer-ap")["wifi-security"]["psk"] == "checkonetwo"
+    assert run(shipped, "apply").returncode == 0 and profile(shipped, "campmixer-ap")["wifi-security"]["psk"] == STANDARD
 assert len(pins_made) == 2  # the same Wi-Fi password on both, a different PIN on each
 
 # A settings file saved in an old Windows encoding (Notepad's "ANSI") must not stop anything. Build 2 crashed here.

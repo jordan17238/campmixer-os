@@ -1,4 +1,4 @@
-# CampMixer OS 0.4.2
+# CampMixer OS 0.4.3
 
 Its own operating system for the Camp PA Mixer's Raspberry Pi, built on Raspberry Pi OS Lite (64-bit).
 You write one image to a microSD card and the Pi starts up as the mixer's remote. There is no install step.
@@ -29,7 +29,7 @@ The image is built by Raspberry Pi's own image builder (pi-gen) with one extra s
 
 The image lands in `image/build/pi-gen/deploy/`.
 
-One password is built into the image and into this source: the standard Wi-Fi password, `checkonetwo`, which every CampMixer starts with and which is therefore public. No login password, PIN or key is built in.
+One password is built into the image and into this source: the standard Wi-Fi password, `plumzebra37`, which every CampMixer starts with and which is therefore public. No login password, PIN or key is built in.
 
 ## First start
 
@@ -47,7 +47,7 @@ Any password or PIN you left blank is made up on that first start and written in
 `campmixer.txt` on the card's `bootfs` partition. Edit it with the card in a computer, or use the commands below. Changes made in the file take effect at the next start.
 
     WIFI_NAME=CampMixer          the mixer's own network
-    WIFI_PASSWORD=checkonetwo    8 to 63 characters; every CampMixer starts with this one
+    WIFI_PASSWORD=plumzebra37    8 to 63 characters; every CampMixer starts with this one
     WIFI_BAND=2.4                2.4 or 5
     WIFI_CHANNEL=6
     JOIN_WIFI_1=Church Hall      up to four networks to join when in range
@@ -75,7 +75,7 @@ A phone on the mixer's own network will say it has no internet, because it has n
 
 Save the file as plain text in UTF-8, which is what Notepad and TextEdit do by default now. A file in another encoding is still read, but a name with an accent or a curly apostrophe in it (`Jordan’s iPhone`) will not match the real network, and `campmixer wifi` says so.
 
-Every CampMixer starts with the same Wi-Fi name and password, `CampMixer` and `checkonetwo`, so one sticker and one sentence cover them all. That makes the password public: wherever a stranger joining the mixer's network would matter, change it, in the file or with `sudo campmixer wifi own --password ...`. Two mixers that run within range of each other also need different names, or a phone cannot tell them apart: `sudo campmixer wifi own --name "CampMixer 2"`. If `WIFI_PASSWORD` is blank or cannot be used (it needs 8 to 63 characters), the mixer makes one up at start-up and writes it into the file. There is no built-in PIN: a made-up one also replaces `WEB_PIN` when it is blank, is not 4 to 12 digits, or is one anybody would guess (1234, 1111, 1212, a year such as 1987, 123456 and the like): an 8-digit one is made up. An easy PIN stays only if `ALLOW_EASY_PIN` says `yes` (see *Who can reach it*). The commands refuse a value the mixer could not use, and change nothing.
+Every CampMixer starts with the same Wi-Fi name and password, `CampMixer` and `plumzebra37`, so one sticker and one sentence cover them all. That makes the password public: wherever a stranger joining the mixer's network would matter, change it, in the file or with `sudo campmixer wifi own --password ...`. Two mixers that run within range of each other also need different names, or a phone cannot tell them apart: `sudo campmixer wifi own --name "CampMixer 2"`. If `WIFI_PASSWORD` is blank or cannot be used (it needs 8 to 63 characters), the mixer makes one up at start-up and writes it into the file. There is no built-in PIN: a made-up one also replaces `WEB_PIN` when it is blank, is not 4 to 12 digits, or is one anybody would guess (1234, 1111, 1212, a year such as 1987, 123456 and the like): an 8-digit one is made up. An easy PIN stays only if `ALLOW_EASY_PIN` says `yes` (see *Who can reach it*). The commands refuse a value the mixer could not use, and change nothing.
 
 ## The web app
 
@@ -163,8 +163,8 @@ Reading does not wear a card. The Pi reads the system from the card once at star
 
 Build 4 (0.3.0) has no `update` command yet. To update from it, after the unlock and restart:
 
-    curl -fsSL https://github.com/jordan17238/campmixer-os/archive/refs/tags/v0.4.2-build8.tar.gz | tar xz -C /tmp
-    sudo bash /tmp/campmixer-os-0.4.2-build8/install.sh
+    curl -fsSL https://github.com/jordan17238/campmixer-os/archive/refs/tags/v0.4.3-build9.tar.gz | tar xz -C /tmp
+    sudo bash /tmp/campmixer-os-0.4.3-build9/install.sh
     sudo reboot
 
 Or write the newer image to the card, as for a new one. Copy `campmixer.txt` off the card first and put it back afterwards to keep your settings.
