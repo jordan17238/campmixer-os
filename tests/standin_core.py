@@ -2,8 +2,8 @@
 """A stand-in for the mixer core (the Teensy), for testing the web app with no mixer.
 
 It speaks PROTOCOL.md layer 2, version 2: it keeps a level and a mute for each input and each output (any number
-of either), says how many there are, answers GET_STATE and SET, and sends METERS 20 times a second. It changes no
-sound: there is none.
+of either) and a 48 V switch for each input, says how many there are, answers GET_STATE and SET, and sends METERS
+20 times a second. It changes no sound and powers nothing: there is nothing there.
 
 Used by the tests. It can also be run by hand against a serial port, for example a USB serial adaptor wired
 to the Pi's header pins 8 and 10 (crossed over) and ground:
@@ -22,7 +22,8 @@ from campmixer_link import FrameDecoder, encode_frame  # noqa: E402
 
 VERSION = 2
 GET_STATE, SET, METERS, INFO, CHANNEL = 0x01, 0x02, 0x82, 0x83, 0x84
-LEVEL, MUTE = 1, 2
+LEVEL, MUTE, PHANTOM = 1, 2, 4
+FLAG_MUTE, FLAG_PHANTOM_ON, FLAG_PHANTOM_SWITCH = 1, 2, 4  # in a CHANNEL's flags
 OFF = -32768
 LEVEL_MIN, LEVEL_MAX = -600, 100  # tenths of a dB
 MAX_CHANNELS = 250
@@ -44,7 +45,9 @@ class StandInCore:
         if names is None:
             names = ["MIC 1", "MIC 2", "KEYS", "LAPTOP"] if inputs == 4 else ["IN %d" % (n + 1) for n in range(inputs)]
             names += ["MASTER"] if outputs == 1 else ["MAIN"] + ["OUT %d" % (n + 2) for n in range(outputs - 1)]
-        self.channels = [{"level": 0, "muted": False, "name": name} for name in names]
+        # Every input can supply 48 V, as on the Camp PA Mixer, and starts with it off. An output has no such switch.
+        self.channels = [{"level": 0, "muted": False, "name": name, "phantom_switch": number < inputs, "phantom": False}
+                         for number, name in enumerate(names)]
         assert len(self.channels) == inputs + outputs
         self.sets = []  # every SET that was acted on, for the tests to look at
         self.on_set = None  # called with (channel, what) after each of them
@@ -57,7 +60,10 @@ class StandInCore:
     def channel(self, number):
         channel = self.channels[number]
         name = channel["name"].encode("utf-8")[:16]
-        return bytes([CHANNEL, number]) + struct.pack(">hBB", channel["level"], 1 if channel["muted"] else 0, len(name)) + name
+        flags = FLAG_MUTE if channel["muted"] else 0
+        if channel["phantom_switch"]:
+            flags |= FLAG_PHANTOM_SWITCH | (FLAG_PHANTOM_ON if channel["phantom"] else 0)
+        return bytes([CHANNEL, number]) + struct.pack(">hBB", channel["level"], flags, len(name)) + name
 
     def meters(self):
         """Something lifelike. An input's meter shows what is coming in, whatever its fader and mute are doing;
@@ -95,8 +101,10 @@ class StandInCore:
             channel["level"] = clamp_level(value)
         elif what == MUTE:
             channel["muted"] = value != 0
+        elif what == PHANTOM and channel["phantom_switch"]:
+            channel["phantom"] = value != 0
         else:
-            return []
+            return []  # a setting this core does not have, or 48 V asked of a channel with no such switch
         self.sets.append((number, what, value))
         if self.on_set:
             self.on_set(channel, what)
@@ -151,6 +159,8 @@ def main():
     def report(channel, what):
         if what == MUTE:
             print("%s: %s" % (channel["name"], "muted" if channel["muted"] else "unmuted"))
+        elif what == PHANTOM:
+            print("%s: 48 V %s" % (channel["name"], "on" if channel["phantom"] else "off"))
         else:
             print("%s: %s" % (channel["name"], "off" if channel["level"] == OFF else "%+.1f dB" % (channel["level"] / 10)))
 

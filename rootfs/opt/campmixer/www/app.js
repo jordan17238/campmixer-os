@@ -1,5 +1,5 @@
 // CampMixer web app: sign in with the PIN, then a fader, a mute button and a meter for every input and output
-// the mixer core says it has, however many that is.
+// the mixer core says it has, however many that is, and a 48 V button on each input the core can power.
 // The mixer's settings live in the mixer core. This page asks for changes and shows what the core reports back,
 // which is how every phone (and the front panel) stays in step.
 // Kept in its own file because the page's security rules (Content-Security-Policy) allow no script written
@@ -22,7 +22,8 @@
     });
   }, { rootMargin: '300px' });
   var practice = null, practiceTimer = null, meterTimer = null;
-  var SEND_EVERY_MS = 40;                          // while a fader is being dragged: at most 25 changes a second
+  var asking = null;                               // the 48 V question on screen, if there is one
+  var SEND_EVERY_MS = 40;                         // while a fader is being dragged: at most 25 changes a second
   var HOLD_MS = 400;                               // after letting go, ignore the core's echoes of the way there
   var STALE_MS = 3500;                             // the core reports at least once a second; this long without is trouble
 
@@ -155,6 +156,7 @@
   }
   function ready(strip){ return usable() && strip.known; }
   function clearStrips(){
+    closeAsk();                    // a question about a strip that is going away goes with it
     strips.forEach(function(strip){ clearTimeout(strip.sendTimer); });
     if (seen) seen.disconnect();
     strips = [];
@@ -175,7 +177,68 @@
     strip.mute.textContent = strip.muted ? 'Muted' : 'Mute';
     strip.element.classList.toggle('muted', strip.muted);
     strip.element.classList.toggle('unknown', !strip.known);
+    drawPhantom(strip);
   }
+  function drawPhantom(strip){
+    // The 48V button is there only on a channel whose core says it has that switch, and it is lit only when the
+    // core says the 48 V is on. Nothing here is taken for granted: wrong either way, somebody's gear is at stake.
+    var button = strip.phantomButton;
+    if (!strip.phantomSwitch){
+      if (button){ button.remove(); strip.phantomButton = null; }
+      return;
+    }
+    if (!button){
+      button = strip.phantomButton = make('button', 'phantom', '48V');
+      button.type = 'button';
+      button.addEventListener('click', function(){ if (ready(strip)) askPhantom(strip); });
+      strip.head.insertBefore(button, strip.readout);
+    }
+    button.setAttribute('aria-pressed', strip.phantom ? 'true' : 'false');
+    button.setAttribute('aria-label', strip.name + ' 48 volt phantom power');
+  }
+
+  // ----- 48 V: asked about first, both ways -----
+  // On, it can damage a keyboard's or a laptop's output. Off, it silences a microphone that runs on it. So neither
+  // happens on one stray touch. The answer goes to the core as "on" or "off", never as "the other way", so two
+  // phones cannot undo each other; and the button changes when the core reports back, not before.
+  function askPhantom(strip){
+    var on = !strip.phantom;
+    closeAsk();
+    asking = { strip: strip, on: on, back: document.activeElement };
+    $('ask-title').textContent = (on ? 'Turn on 48 V for ' : 'Turn off 48 V for ') + strip.name + '?';
+    $('ask-text').textContent = on
+      ? '48 V phantom power is for condenser microphones and active DI boxes. It can damage a keyboard, laptop or phone plugged into this input.'
+      : 'A microphone that runs on 48 V goes silent without it.';
+    $('ask-yes').textContent = on ? 'Turn on 48 V' : 'Turn off 48 V';
+    $('ask').hidden = false;
+    document.body.classList.add('asking');
+    $('ask-no').focus();           // the safe answer is the one under the thumb and the Enter key
+  }
+  function closeAsk(){
+    if (!asking) return;
+    var back = asking.back;
+    asking = null;
+    $('ask').hidden = true;
+    document.body.classList.remove('asking');
+    if (back && back.isConnected && back.focus) back.focus({ preventScroll: true });
+  }
+  $('ask-no').addEventListener('click', closeAsk);
+  $('ask-yes').addEventListener('click', function(){
+    var question = asking;
+    closeAsk();
+    if (question && ready(question.strip)) send(L.set(question.strip.channel, L.PHANTOM, question.on ? 1 : 0));
+  });
+  $('ask').addEventListener('click', function(event){
+    if (event.target === this) closeAsk();           // a touch outside the question means no
+  });
+  document.addEventListener('keydown', function(event){
+    if (!asking) return;
+    if (event.key === 'Escape'){ event.preventDefault(); closeAsk(); }
+    else if (event.key === 'Tab'){                   // the keyboard stays inside the question until it is answered
+      event.preventDefault();
+      (document.activeElement === $('ask-no') ? $('ask-yes') : $('ask-no')).focus();
+    }
+  });
   function drawMeter(strip){
     // An input's meter shows what is coming in on it, fader down and muted or not: that is how to see a
     // microphone is alive before bringing it up. The master's shows what is going out.
@@ -206,7 +269,8 @@
     // Made as soon as the core says how many channels there are. It stays greyed until the core has said
     // where that channel stands.
     var strip = { channel: number, level: L.OFF, muted: false, name: label, known: false, visible: !seen, peak: -Infinity,
-                  sent: L.OFF, sentAt: 0, sendTimer: null, drag: null, levelHold: 0, muteHold: 0 };
+                  sent: L.OFF, sentAt: 0, sendTimer: null, drag: null, levelHold: 0, muteHold: 0,
+                  phantomSwitch: false, phantom: false, phantomButton: null };
     var channel = { name: label };
     var element = make('div', 'strip');
     var head = make('div', 'strip-head');
@@ -238,7 +302,7 @@
     [fader, meter].forEach(function(part){ middle.appendChild(part); });
     [down, middle, up].forEach(function(part){ row.appendChild(part); });
     [head, row].forEach(function(part){ element.appendChild(part); });
-    strip.element = element; strip.label = name; strip.readout = readout; strip.mute = mute;
+    strip.element = element; strip.head = head; strip.label = name; strip.readout = readout; strip.mute = mute;
     strip.fader = fader; strip.cover = cover; strip.down = down; strip.up = up;
     element.campmixerStrip = strip;
     if (seen) seen.observe(element);
@@ -335,6 +399,10 @@
       strip.level = update.level; strip.sent = update.level;
     }
     if (!strip.known || now >= strip.muteHold) strip.muted = update.muted;
+    if (update.phantomSwitch !== strip.phantomSwitch || update.phantom !== strip.phantom){
+      strip.phantomSwitch = update.phantomSwitch; strip.phantom = update.phantom;
+      if (asking && asking.strip === strip) closeAsk();   // what the question was about has changed under it
+    }
     strip.known = true;
     drawStrip(strip);
   }
@@ -367,6 +435,7 @@
       else if (!mixer) note = 'The mixer core is connected but has not reported its settings yet.';
       else note = 'The mixer core has stopped reporting its settings.';
     }
+    if (!ok) closeAsk();           // nothing can be switched on a mixer that is out of reach
     $('mixer').classList.toggle('unavailable', !ok);
     $('mixer-waiting').hidden = ok;
     $('mixer-note').textContent = note;

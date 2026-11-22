@@ -75,6 +75,17 @@
 <div><button type="button" class="quiet" id="sign-out">Sign out on this phone</button></div>
 </div>
 </main>
+
+<div class="ask" id="ask" hidden>
+  <div class="card stack" role="alertdialog" aria-modal="true" aria-labelledby="ask-title" aria-describedby="ask-text">
+    <h2 class="flush" id="ask-title"></h2>
+    <p id="ask-text"></p>
+    <div class="ask-buttons">
+      <button type="button" class="quiet" id="ask-no">Cancel</button>
+      <button type="button" id="ask-yes"></button>
+    </div>
+  </div>
+</div>
 <script src="/mixer-link.js"></script>
 <script src="/app.js"></script>
 </body>

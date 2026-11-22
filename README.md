@@ -1,4 +1,4 @@
-# CampMixer OS 0.4.4
+# CampMixer OS 0.5.0
 
 Its own operating system for the Camp PA Mixer's Raspberry Pi, built on Raspberry Pi OS Lite (64-bit).
 You write one image to a microSD card and the Pi starts up as the mixer's remote. There is no install step.
@@ -7,7 +7,7 @@ This folder is the source for that image.
 
 ## What the OS does
 
-- **Web app at http://mixer.local, behind a PIN.** A fader, a mute button and a level meter for every input and every output the mixer has, however many that is, expansion units included. See *The web app* and *Who can reach it* below.
+- **Web app at http://mixer.local, behind a PIN.** A fader, a mute button and a level meter for every input and every output the mixer has, however many that is, expansion units included, and a 48 V switch for every input the mixer can power. See *The web app* and *Who can reach it* below.
 - **Wi-Fi.** It joins a network you have listed when that network is in range, so the mixer sits on the venue's LAN. Otherwise it makes its own network, `CampMixer`.
 - **Ethernet.** Plug it into any network and it takes an address. A cable straight to a laptop works too, within a few seconds, on a 169.254 address. It keeps asking for a proper address in the background, so a router that starts up after the mixer is still picked up without touching the cable.
 - **SSH** is on: `ssh mixer@mixer.local`.
@@ -90,11 +90,17 @@ Every input and every output has:
 - **Mute.** The button turns red and reads *Muted*.
 - **A meter.** An input's meter shows what is coming in on it, fader down and muted or not, so a microphone can be seen to be alive before it is brought up. An output's shows what is going out of it.
 
+Every input the mixer core can power also has **48V**: phantom power, for a condenser microphone or an active DI box. On the Camp PA Mixer that is all four inputs.
+
+- The button is an outline while the 48 V is off and amber while it is on. It shows what the mixer core reports, so it changes when the power has really been switched, not when the button is pressed.
+- Pressing it asks first, both ways. Switched on, 48 V can damage the output of a keyboard, a laptop or a phone plugged into that input. Switched off, a microphone that runs on it goes silent. *Cancel*, a touch outside the question and the Escape key all mean no.
+- It does not touch the fader or the mute. Keeping the switch from thumping through the speakers is the mixer core's job.
+
 The settings live in the mixer core, not in the phone or the Pi. A change made on one phone shows on every other phone as the core confirms it, and so will a turn of a knob on the front panel.
 
 When the mixer core cannot be reached the controls go grey and the page says why. From there **Try the controls without a mixer** runs a practice mixer inside the page, the same size as the mixer that was last connected. It is marked as practice, is connected to nothing, and ends by itself the moment a real mixer core appears.
 
-Not in yet: gain, 48 V, ground lift, high-pass, feedback filter, names and scenes (the front panel's menus).
+Not in yet: gain, ground lift, high-pass, feedback filter, names and scenes (the front panel's menus).
 
 ## Who can reach it
 
@@ -163,8 +169,8 @@ Reading does not wear a card. The Pi reads the system from the card once at star
 
 Build 4 (0.3.0) has no `update` command yet. To update from it, after the unlock and restart:
 
-    curl -fsSL https://github.com/jordan17238/campmixer-os/archive/refs/tags/v0.4.4-build11.tar.gz | tar xz -C /tmp
-    sudo bash /tmp/campmixer-os-0.4.4-build11/install.sh
+    curl -fsSL https://github.com/jordan17238/campmixer-os/archive/refs/tags/v0.5.0-build12.tar.gz | tar xz -C /tmp
+    sudo bash /tmp/campmixer-os-0.5.0-build12/install.sh
     sudo reboot
 
 Or write the newer image to the card, as for a new one. Copy `campmixer.txt` off the card first and put it back afterwards to keep your settings.
@@ -173,7 +179,7 @@ Or write the newer image to the card, as for a new one. Copy `campmixer.txt` off
 
 ## Try it before the mixer exists
 
-- Open http://mixer.local and sign in. The page says "No signal from the mixer core", which is right: there is no Teensy yet. **Try the controls without a mixer** lets you use the faders anyway, in practice mode.
+- Open http://mixer.local and sign in. The page says "No signal from the mixer core", which is right: there is no Teensy yet. **Try the controls without a mixer** lets you use the faders and the 48V buttons anyway, in practice mode.
 - **Loopback test** (under *The Pi and its link to the mixer core*): join header pins 8 and 10 with a jumper wire and press *Send a test frame*. "Came back in N ms" proves the serial port, the bridge and the WebSocket.
 - **A stand-in mixer core on a laptop:** with a 3.3 V USB serial adaptor wired to pins 8, 10 and 6, `python3 tests/standin_core.py /dev/ttyUSB0` answers the app the way the Teensy will, so the real page can be used over the real link.
 - Without the USB adaptor, the Pi's built-in radio makes the `CampMixer` network on the bench. Once the Alfa is plugged in at start-up, that takes over and the built-in radio goes quiet.

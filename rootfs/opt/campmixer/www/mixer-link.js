@@ -1,5 +1,5 @@
-// CampMixer: the messages the app and the mixer core exchange (PROTOCOL.md, layer 2, version 2),
-// the fader's scale, and a practice core that lives in the page for trying the controls with no mixer.
+// CampMixer: the messages the app and the mixer core exchange (PROTOCOL.md, layer 2, version 2) for level, mute,
+// 48 V and meters, the fader's scale, and a practice core that lives in the page for trying the controls with no mixer.
 // The mixer core says how many inputs and outputs it has; nothing here assumes a number.
 // No page, no network: plain functions, so the same file is checked with Node (tests/test_mixer_link.js).
 (function(root){
@@ -7,7 +7,8 @@
 
   var VERSION = 2;
   var GET_STATE = 0x01, SET = 0x02, METERS = 0x82, INFO = 0x83, CHANNEL = 0x84;
-  var LEVEL = 1, MUTE = 2;
+  var LEVEL = 1, MUTE = 2, PHANTOM = 4;   // (3 and 5 to 7 are kept for the rest of the channel menu)
+  var FLAG_MUTE = 1, FLAG_PHANTOM_ON = 2, FLAG_PHANTOM_SWITCH = 4;   // in a CHANNEL's flags; bits 4 to 7 are the unit
   var OFF = -32768;               // a level of "no sound at all"
   var LEVEL_MIN = -600, LEVEL_MAX = 100, STEP = 5;   // tenths of a dB: -60.0 to +10.0, in half-dB steps
   var MAX_CHANNELS = 250;         // inputs and outputs together: a channel's number has to fit in one byte
@@ -41,12 +42,15 @@
     }
     if (bytes[0] === CHANNEL){
       if (bytes.length < 6) return null;
-      var size = bytes[5];
+      var size = bytes[5], flags = bytes[4];
       if (size > 16 || bytes.length < 6 + size) return null;
+      var phantomSwitch = (flags & FLAG_PHANTOM_SWITCH) !== 0;
       return {
         type: 'channel', channel: bytes[1],
         level: new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getInt16(2),
-        muted: (bytes[4] & 1) === 1,
+        muted: (flags & FLAG_MUTE) !== 0,
+        phantomSwitch: phantomSwitch,                                   // this channel can supply 48 V at all
+        phantom: phantomSwitch && (flags & FLAG_PHANTOM_ON) !== 0,      // and is supplying it now
         name: utf8(bytes.subarray(6, 6 + size))
       };
     }
@@ -119,19 +123,22 @@
     this.outputs = Math.max(1, Math.min(MAX_CHANNELS - this.inputs, outputs || 1));
     this.channels = [];
     var usual = [['MIC 1', -60], ['MIC 2', -100], ['KEYS', OFF], ['LAPTOP', -120]];
+    // Every input can supply 48 V, as on the Camp PA Mixer, and it starts off everywhere. An output has no such switch.
     for (var n = 0; n < this.inputs; n++){
-      if (this.inputs === 4) this.channels.push({ level: usual[n][1], muted: n === 3, name: usual[n][0] });
-      else this.channels.push({ level: n % 5 === 4 ? OFF : -30 * (n % 4) - 30, muted: n % 7 === 6, name: 'IN ' + (n + 1) });
+      if (this.inputs === 4) this.channels.push({ level: usual[n][1], muted: n === 3, name: usual[n][0], phantomSwitch: true, phantom: false });
+      else this.channels.push({ level: n % 5 === 4 ? OFF : -30 * (n % 4) - 30, muted: n % 7 === 6, name: 'IN ' + (n + 1), phantomSwitch: true, phantom: false });
     }
     for (var m = 0; m < this.outputs; m++){
-      this.channels.push({ level: m ? -60 : 0, muted: false, name: this.outputs === 1 ? 'MASTER' : m ? 'OUT ' + (m + 1) : 'MAIN' });
+      this.channels.push({ level: m ? -60 : 0, muted: false, name: this.outputs === 1 ? 'MASTER' : m ? 'OUT ' + (m + 1) : 'MAIN',
+                           phantomSwitch: false, phantom: false });
     }
     this.phase = 0;
   }
   PracticeCore.prototype.info = function(){ return new Uint8Array([INFO, VERSION, this.inputs, this.outputs]); };
   PracticeCore.prototype.channel = function(n){
     var channel = this.channels[n], level = channel.level & 0xFFFF;
-    var parts = [CHANNEL, n, level >> 8, level & 0xFF, channel.muted ? 1 : 0, channel.name.length];
+    var flags = (channel.muted ? FLAG_MUTE : 0) | (channel.phantomSwitch ? FLAG_PHANTOM_SWITCH | (channel.phantom ? FLAG_PHANTOM_ON : 0) : 0);
+    var parts = [CHANNEL, n, level >> 8, level & 0xFF, flags, channel.name.length];
     for (var i = 0; i < channel.name.length; i++) parts.push(channel.name.charCodeAt(i) & 0x7F);
     return new Uint8Array(parts);
   };
@@ -146,6 +153,7 @@
     var value = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getInt16(3);
     if (bytes[2] === LEVEL) channel.level = clampLevel(value);
     else if (bytes[2] === MUTE) channel.muted = value !== 0;
+    else if (bytes[2] === PHANTOM && channel.phantomSwitch) channel.phantom = value !== 0;
     else return;
     this.deliver(this.channel(bytes[1]));
   };
@@ -170,7 +178,7 @@
 
   var api = {
     VERSION: VERSION, GET_STATE: GET_STATE, SET: SET, METERS: METERS, INFO: INFO, CHANNEL: CHANNEL, LEVEL: LEVEL, MUTE: MUTE,
-    OFF: OFF, LEVEL_MIN: LEVEL_MIN, LEVEL_MAX: LEVEL_MAX, STEP: STEP, MAX_CHANNELS: MAX_CHANNELS,
+    PHANTOM: PHANTOM, OFF: OFF, LEVEL_MIN: LEVEL_MIN, LEVEL_MAX: LEVEL_MAX, STEP: STEP, MAX_CHANNELS: MAX_CHANNELS,
     getState: getState, set: set, decode: decode, clampLevel: clampLevel, levelAt: levelAt, positionOf: positionOf,
     nudge: nudge, levelText: levelText, meterWidth: meterWidth, PracticeCore: PracticeCore
   };

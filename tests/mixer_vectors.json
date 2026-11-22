@@ -46,6 +46,20 @@
    "set": 2,
    "value": 0,
    "hex": "0203020000"
+  },
+  {
+   "what": "channel 0 (input 1): 48 V on",
+   "channel": 0,
+   "set": 4,
+   "value": 1,
+   "hex": "0200040001"
+  },
+  {
+   "what": "channel 1 (input 2): 48 V off",
+   "channel": 1,
+   "set": 4,
+   "value": 0,
+   "hex": "0201040000"
   }
  ],
  "info": {
@@ -56,31 +70,39 @@
  },
  "channels": [
   {
-   "hex": "8400ffc400054d49432031",
+   "hex": "8400ffc404054d49432031",
    "channel": 0,
    "level": -60,
    "muted": false,
+   "phantom_switch": true,
+   "phantom": false,
    "name": "MIC 1"
   },
   {
-   "hex": "8401ff9700054d49432032",
+   "hex": "8401ff9706054d49432032",
    "channel": 1,
    "level": -105,
    "muted": false,
+   "phantom_switch": true,
+   "phantom": true,
    "name": "MIC 2"
   },
   {
-   "hex": "8402800000044b455953",
+   "hex": "8402800004044b455953",
    "channel": 2,
    "level": -32768,
    "muted": false,
+   "phantom_switch": true,
+   "phantom": false,
    "name": "KEYS"
   },
   {
-   "hex": "8403002301064c4150544f50",
+   "hex": "8403002305064c4150544f50",
    "channel": 3,
    "level": 35,
    "muted": true,
+   "phantom_switch": true,
+   "phantom": false,
    "name": "LAPTOP"
   },
   {
@@ -88,6 +110,8 @@
    "channel": 4,
    "level": 0,
    "muted": false,
+   "phantom_switch": false,
+   "phantom": false,
    "name": "MASTER"
   }
  ],

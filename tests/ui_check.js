@@ -1,5 +1,5 @@
 // Drives the web app in a real browser (headless Chrome, phone-sized, touch) against tests/ui_server.py:
-// signing in, the faders, mute, two phones staying in step, the mixer core going away, practice mode, a PIN change.
+// signing in, the faders, mute, 48 V, two phones staying in step, the mixer core going away, practice mode, a PIN change.
 // Takes pictures along the way. Not part of the automatic checks, because it needs Chrome:
 //
 //   npm install puppeteer-core            (anywhere; point NODE_PATH at its node_modules)
@@ -7,6 +7,8 @@
 //
 // To check a mixer that is already running (with a mixer core, or a stand-in, on its serial port) instead:
 //   CAMPMIXER_URL=http://mixer.local CAMPMIXER_PIN=48271935 node tests/ui_check.js
+// That moves faders and mutes on the mixer it is pointed at. It leaves the 48 V alone unless CAMPMIXER_48V=yes
+// says the first input has nothing plugged into it that 48 V could hurt (a stand-in has nothing at all).
 // CAMPMIXER_SLOW=5 allows five times as long for everything, for a slow machine.
 'use strict';
 const assert = require('assert');
@@ -93,6 +95,15 @@ async function drag(page, fromX, fromY, dx, dy = 0, steps = 12) {
   }
   await page.touchscreen.touchEnd();
 }
+// The 48V button of every strip: 'true' or 'false' as the page shows it, or null where there is no such button.
+const phantoms = page => page.evaluate(() => Array.from(document.querySelectorAll('#strips .strip')).map(el => {
+  const button = el.querySelector('.phantom');
+  return button ? button.getAttribute('aria-pressed') : null;
+}));
+const pressPhantom = (page, n) => page.evaluate(n => document.querySelectorAll('#strips .strip')[n].querySelector('.phantom').click(), n);
+// The names that do not fit their strip and are shown cut short.
+const cutNames = page => page.evaluate(() => Array.from(document.querySelectorAll('#strips .strip-name'))
+  .filter(name => name.scrollWidth > name.clientWidth).map(name => name.textContent));
 const visible = (page, selector) => page.evaluate(selector => {
   const el = document.querySelector(selector);
   return !!el && !el.hidden && el.getClientRects().length > 0;
@@ -165,6 +176,9 @@ async function signIn(page, pin) {
     if (server) {
       assert.deepStrictEqual((await Promise.all([0, 1, 2, 3, 4].map(n => strip(phone, n)))).map(s => [s.name, s.level, s.muted]),
         [['MIC 1', '−6.0 dB', false], ['MIC 2', '−10.0 dB', false], ['KEYS', 'Off', false], ['LAPTOP', '−12.0 dB', true], ['MASTER', '0.0 dB', false]]);
+      // A 48V button on each input, showing off, and none on the output. No name is cut short to make room for it.
+      assert.deepStrictEqual(await phantoms(phone), ['false', 'false', 'false', 'false', null]);
+      assert.deepStrictEqual(await cutNames(phone), [], 'a name does not fit its strip');
     }
     // Everything fits a phone's width: nothing runs off the side.
     assert.ok(await phone.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), 'the page is wider than the phone');
@@ -244,11 +258,86 @@ async function signIn(page, pin) {
     await second.evaluate(() => document.querySelectorAll('#strips .mute')[4].click());   // and off again, from the other phone
     await until('the first phone to show the master unmuted', async () => !(await strip(phone, 4)).muted);
 
+    // --- 48 V: asked about first, both ways, and the button shows what the mixer core reports
+    if (server || process.env.CAMPMIXER_48V === 'yes') {
+      const name = (await strip(phone, 0)).name;
+      const reached = () => server ? server.lines.filter(line => line.includes(' 48V ')).length : 0;
+      const before48 = await strip(phone, 0);
+      assert.strictEqual((await phantoms(phone))[0], 'false', 'the first input has no 48V button, or its 48 V is already on');
+
+      // No is the easy answer: Cancel, a touch outside the question, the Escape key. None of them switches anything.
+      await pressPhantom(phone, 0);
+      await until('the 48 V question', () => visible(phone, '#ask'));
+      assert.strictEqual(await text(phone, '#ask-title'), 'Turn on 48 V for ' + name + '?');
+      assert.strictEqual(await text(phone, '#ask-yes'), 'Turn on 48 V');
+      assert.strictEqual(await phone.evaluate(() => document.activeElement.id), 'ask-no', 'the question does not start on Cancel');
+      const askSizes = await phone.evaluate(() => Array.from(document.querySelectorAll('#ask button')).map(b => { const r = b.getBoundingClientRect(); return [Math.round(r.width), Math.round(r.height), r.right <= window.innerWidth && r.bottom <= window.innerHeight]; }));
+      assert.ok(askSizes.every(([w, h, onScreen]) => w >= 44 && h >= 44 && onScreen), 'an answer is too small or off the screen: ' + JSON.stringify(askSizes));
+      await sleep(200);
+      await phone.screenshot({ path: path.join(SHOTS, '04b-48v-question.png') });
+      await phone.keyboard.press('Tab');                                  // the keyboard stays inside the question
+      assert.strictEqual(await phone.evaluate(() => document.activeElement.id), 'ask-yes');
+      await phone.keyboard.press('Tab');
+      assert.strictEqual(await phone.evaluate(() => document.activeElement.id), 'ask-no');
+      await phone.tap('#ask-no');
+      assert.ok(!(await visible(phone, '#ask')), 'Cancel left the question up');
+      await pressPhantom(phone, 0);
+      await until('the question again', () => visible(phone, '#ask'));
+      await phone.touchscreen.tap(195, 60);                               // above the question, on the dimmed page
+      await until('the question to go at a touch outside it', async () => !(await visible(phone, '#ask')));
+      await pressPhantom(phone, 0);
+      await until('the question a third time', () => visible(phone, '#ask'));
+      await phone.keyboard.press('Escape');
+      assert.ok(!(await visible(phone, '#ask')), 'Escape left the question up');
+      await sleep(500);
+      assert.strictEqual((await phantoms(phone))[0], 'false', '48 V shows as on without a yes');
+      assert.strictEqual(reached(), 0, 'a 48 V change reached the mixer core without a yes');
+
+      // Yes: the core switches it, and tells every phone.
+      await pressPhantom(phone, 0);
+      await until('the question for a yes', () => visible(phone, '#ask'));
+      await phone.tap('#ask-yes');
+      await until('48 V on, on the first phone', async () => (await phantoms(phone))[0] === 'true');
+      if (server) await server.line('SET ' + name + ' 48V on');
+      await until('48 V on, on the second phone', async () => (await phantoms(second))[0] === 'true');
+      assert.ok(!(await visible(phone, '#ask')));
+      await sleep(300);
+      await shot(phone, '04c-48v-on');
+
+      // Off is asked about too. Both phones are asked at once; the second says yes, and the first one's question,
+      // which no longer fits what is so, goes by itself.
+      await pressPhantom(second, 0);
+      await until('the question on the second phone', () => visible(second, '#ask'));
+      assert.strictEqual(await text(second, '#ask-title'), 'Turn off 48 V for ' + name + '?');
+      assert.strictEqual(await text(second, '#ask-yes'), 'Turn off 48 V');
+      await pressPhantom(phone, 0);
+      await until('the question on the first phone', () => visible(phone, '#ask'));
+      await second.evaluate(() => document.querySelector('#ask-yes').click());
+      await until('48 V off again on both phones', async () => (await phantoms(phone))[0] === 'false' && (await phantoms(second))[0] === 'false');
+      if (server) await server.line('SET ' + name + ' 48V off');
+      await until('the first phone\'s question to go', async () => !(await visible(phone, '#ask')));
+      await sleep(300);
+      assert.strictEqual(reached(), 0, 'more 48 V changes reached the mixer core than were asked for');
+      // The fader and the mute of that input were not touched by any of it.
+      const after48 = await strip(phone, 0);
+      assert.deepStrictEqual([after48.level, after48.muted], [before48.level, before48.muted]);
+    }
+
     // --- dark, and a laptop
     await phone.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: 'dark' }]);
     await sleep(200);
     await shot(phone, '05-dark');
     await phone.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: 'light' }]);
+    // A narrow phone (360 wide): still nothing off the side, no name cut short, every button big enough for a thumb.
+    await phone.setViewport({ ...phoneView, width: 360, height: 740 });
+    await sleep(300);
+    assert.ok(await phone.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), 'the page is wider than a narrow phone');
+    if (server) assert.deepStrictEqual(await cutNames(phone), [], 'a name does not fit its strip on a narrow phone');
+    const narrowSizes = await phone.evaluate(() => Array.from(document.querySelectorAll('#strips button')).map(b => { const r = b.getBoundingClientRect(); return [Math.round(r.width), Math.round(r.height)]; }));
+    assert.ok(narrowSizes.every(([w, h]) => w >= 44 && h >= 44), 'a button is too small for a thumb on a narrow phone: ' + JSON.stringify(narrowSizes));
+    await shot(phone, '05b-narrow-phone');
+    await phone.setViewport(phoneView);
+    await sleep(200);
     const laptop = await context.newPage();
     await laptop.setViewport({ width: 1280, height: 800 });
     await laptop.goto(url, { waitUntil: 'networkidle0' });
@@ -267,10 +356,13 @@ async function signIn(page, pin) {
     await phone.bringToFront();
 
     if (server) {
-      // --- the mixer core goes away
+      // --- the mixer core goes away, with a 48 V question still on the screen: the question goes too
+      await pressPhantom(phone, 1);
+      await until('a 48 V question to be up', () => visible(phone, '#ask'));
       await server.say('core off');
       await until('the phone to notice', async () => (await text(phone, '#mixer-note')).includes('No signal from the mixer core'), 8000);
       assert.ok(await phone.evaluate(() => document.querySelector('#mixer').classList.contains('unavailable')));
+      assert.ok(!(await visible(phone, '#ask')), 'a 48 V question stayed up with no mixer core to put it to');
       const stuck = await strip(phone, 0);
       box = await faderBox(phone, 0);
       await drag(phone, box.thumb, box.y, 60);
@@ -289,6 +381,14 @@ async function signIn(page, pin) {
       assert.notStrictEqual((await strip(phone, 0)).level, practiceStart.level, 'practice fader did not move');
       await phone.evaluate(() => document.querySelectorAll('#strips .mute')[0].click());
       await until('practice mute', async () => (await strip(phone, 0)).muted);
+      assert.deepStrictEqual(await phantoms(phone), ['false', 'false', 'false', 'false', null]);
+      await pressPhantom(phone, 1);                                     // 48 V can be tried too, on nothing
+      await until('the practice 48 V question', () => visible(phone, '#ask'));
+      // (Chrome takes no notice of a tap in the first third of a second after a fader was flicked and let go,
+      // the way it treats a tap that stops a scroll. The drag above ended that way, so wait it out.)
+      await sleep(400);
+      await phone.tap('#ask-yes');
+      await until('practice 48 V', async () => (await phantoms(phone))[1] === 'true');
       await sleep(400);
       await phone.evaluate(() => window.scrollTo(0, 0));
       await shot(phone, '08-practice');
@@ -300,6 +400,7 @@ async function signIn(page, pin) {
       await until('practice mode to end', async () => !(await visible(phone, '#practice-banner')), 8000);
       await until('the real mixer again', async () => (await strip(phone, 0)) !== null && (await strip(phone, 0)).level === stuck.level && !(await strip(phone, 0)).muted, 8000);
       assert.ok(!(await phone.evaluate(() => document.querySelector('#mixer').classList.contains('unavailable'))));
+      assert.deepStrictEqual(await phantoms(phone), ['false', 'false', 'false', 'false', null], 'the practice 48 V outlived practice mode');
 
       // --- the Pi's details are folded away at the bottom
       await phone.evaluate(() => { document.querySelector('#pi').open = true; });
@@ -345,6 +446,8 @@ async function signIn(page, pin) {
         assert.deepStrictEqual(await big.evaluate(() => Array.from(document.querySelectorAll('#strips .group')).map(h => h.textContent)), ['Inputs', 'Outputs']);
         assert.deepStrictEqual([(await strip(big, 0)).name, (await strip(big, 31)).name, (await strip(big, 32)).name, (await strip(big, 37)).name], ['IN 1', 'IN 32', 'MAIN', 'OUT 6']);
         assert.ok(await big.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), 'the big mixer is wider than the phone');
+        const bigPhantoms = await phantoms(big);                         // a 48V button on each of the 32 inputs, none on the 6 outputs
+        assert.ok(bigPhantoms.slice(0, 32).every(p => p === 'false') && bigPhantoms.slice(32).every(p => p === null), JSON.stringify(bigPhantoms));
         await sleep(400);
         await big.screenshot({ path: path.join(SHOTS, '11-big-mixer-top.png') });
         const lastBox = await faderBox(big, 37);                         // the last output, right at the bottom
@@ -370,6 +473,11 @@ async function signIn(page, pin) {
   } catch (error) {
     console.error(error);
     console.error('problems the browser reported:', problems);
+    // A picture of every page as it stood when the check failed, for working out why.
+    let number = 0;
+    for (const page of await browser.pages()) {
+      try { await page.screenshot({ path: path.join(SHOTS, 'failed-' + (++number) + '.png') }); } catch (e) { /* that page has gone */ }
+    }
     process.exitCode = 1;
   } finally {
     await browser.close();

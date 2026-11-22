@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Volume, mute and meters, end to end without a mixer: two signed-in phones, the real bridge, a pretend serial
+"""Volume, mute, 48 V and meters, end to end without a mixer: two signed-in phones, the real bridge, a pretend serial
 port and a stand-in mixer core on the far side of it. Also checks the shared example messages (PROTOCOL.md).
 
 Needs: pip install websockets
@@ -34,7 +34,8 @@ with open(os.path.join(HERE, "mixer_vectors.json")) as handle:
     VECTORS = json.load(handle)
 example = sc.StandInCore()
 for channel, wanted in zip(example.channels, VECTORS["channels"]):
-    channel.update(level=wanted["level"], muted=wanted["muted"], name=wanted["name"])
+    assert channel["phantom_switch"] == wanted["phantom_switch"], wanted  # 48 V on every input, and not on the output
+    channel.update(level=wanted["level"], muted=wanted["muted"], phantom=wanted["phantom"], name=wanted["name"])
 assert example.info().hex() == VECTORS["info"]["hex"]
 assert [example.channel(n).hex() for n in range(5)] == [v["hex"] for v in VECTORS["channels"]]
 assert example.handle(bytes.fromhex(VECTORS["to_core"][0]["hex"])) == [example.info()] + [example.channel(n) for n in range(5)]
@@ -43,11 +44,20 @@ for vector in VECTORS["to_core"][1:]:
     assert answers == [example.channel(vector["channel"])], vector  # one change, one answer: just that channel
     assert example.sets[-1] == (vector["channel"], vector["set"], vector["value"]), vector
 assert [c["level"] for c in example.channels] == [-60, sc.OFF, 35, 35, 0] and example.channels[4]["muted"] and not example.channels[3]["muted"]
+assert [c["phantom"] for c in example.channels] == [True, False, False, False, False]  # input 1 switched on, input 2 off
+# The flags of a CHANNEL: bit 0 mute, bit 1 "48 V is on", bit 2 "this channel has a 48 V switch".
+example.channels[1].update(muted=True, phantom=True)
+assert [example.channel(n)[4] for n in range(5)] == [6, 7, 4, 4, 1]
+example.channels[4]["phantom"] = True  # an output has no switch, so it never says its 48 V is on, whatever happens
+assert example.channel(4)[4] == 1
+example.channels[1].update(muted=False, phantom=False)
+example.channels[4]["phantom"] = False
 assert [sc.StandInCore.meter_byte(p) for p in (0, -6, -60, float("-inf"), -12.5, 3, -127, -126.9)] == [0, 12, 120, 255, 25, 0, 255, 254]
 assert bytes([sc.METERS, 0, 12, 120, 255, 25]).hex() == VECTORS["meters"]["hex"]
-# What it will not act on: no such channel, no such setting, cut short, not a message of this version.
+# What it will not act on: no such channel, no such setting, 48 V asked of the output (which has no such switch),
+# cut short, not a message of this version.
 before = [example.channel(n) for n in range(5)]
-for ignored in ("0209010000", "0200630000", "020001ff", "02", "00", "7f0102", "810104", "83020401", ""):
+for ignored in ("0209010000", "0200630000", "0204040001", "0200030001", "020004", "020001ff", "02", "00", "7f0102", "810104", "83020401", ""):
     assert example.handle(bytes.fromhex(ignored)) == [] and [example.channel(n) for n in range(5)] == before, ignored
 assert sc.clamp_level(-601) == sc.OFF and sc.clamp_level(-600) == -600 and sc.clamp_level(101) == 100 and sc.clamp_level(32767) == 100
 # Any number of inputs and outputs: the answer to "where does everything stand" is one small message a channel.
@@ -64,7 +74,8 @@ def decode_channel(payload):
     assert payload[0] == sc.CHANNEL
     level, flags, size = struct.unpack(">hBB", payload[2:6])
     assert len(payload) == 6 + size
-    return payload[1], {"level": level, "muted": bool(flags & 1), "name": payload[6:].decode()}
+    return payload[1], {"level": level, "muted": bool(flags & 1), "phantom": bool(flags & 2), "phantom_switch": bool(flags & 4),
+                        "name": payload[6:].decode()}
 
 
 def set_message(channel, what, value):
@@ -164,6 +175,21 @@ async def run_mixer(inputs, outputs):
             await second.send(set_message(total - 1, sc.MUTE, 0))
             await phone.until(lambda p: p.channels[total - 1]["muted"] is False)
 
+            # 48 V: every input says it has the switch and that it is off; no output has one. One phone asks for it
+            # on the first input: the core switches it and tells every phone. Asked of an output, nothing happens.
+            assert all(phone.channels[n]["phantom_switch"] and not phone.channels[n]["phantom"] for n in range(inputs))
+            assert not any(phone.channels[n]["phantom_switch"] or phone.channels[n]["phantom"] for n in range(inputs, total))
+            await first.send(set_message(0, sc.PHANTOM, 1))
+            for device in (phone, tablet):
+                await device.until(lambda p: p.channels.get(0, {}).get("phantom") is True)
+            assert core.channels[0]["phantom"] and core.sets[-1] == (0, sc.PHANTOM, 1)
+            await first.send(set_message(out, sc.PHANTOM, 1))  # an output: ignored, and no answer
+            await second.send(set_message(0, sc.PHANTOM, 0))
+            for device in (phone, tablet):
+                await device.until(lambda p: p.channels[0]["phantom"] is False)
+            assert not any(c["phantom"] for c in core.channels) and core.sets[-1] == (0, sc.PHANTOM, 0)
+            assert all(c["level"] == 0 for n, c in phone.channels.items() if n not in (0, total - 1))  # nothing else moved
+
             # A drag is a run of changes; the last one is where it ends up, on both.
             sets_before = len(core.sets)
             for level in range(-60, -161, -5):
@@ -200,7 +226,7 @@ async def run_mixer(inputs, outputs):
             await phone.until(lambda p: p.status is not None)
             link = phone.status["link"]
             assert link["up"] and link["crc_errors"] + link["format_errors"] == 0 and link["tx_dropped"] == 0, link
-            assert link["tx_frames"] == len(core.sets) + 2, (link, len(core.sets))  # the changes, one GET_STATE, one ignored
+            assert link["tx_frames"] == len(core.sets) + 3, (link, len(core.sets))  # the changes, one GET_STATE, two ignored
 
         # Without the cookie there is no way to move anything.
         try:
@@ -234,7 +260,7 @@ async def main():
     await run_mixer(1, 1)    # the smallest there can be
     await run_mixer(48, 8)   # a big one
     await run_mixer(200, 50)  # the most a channel number allows
-    print("mixer (volume, mute, meters, any number of inputs and outputs): all checks passed")
+    print("mixer (volume, mute, 48 V, meters, any number of inputs and outputs): all checks passed")
 
 
 asyncio.run(main())

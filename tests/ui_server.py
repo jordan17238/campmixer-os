@@ -15,6 +15,7 @@ import json
 import os
 import pty
 import secrets
+import socket
 import subprocess
 import sys
 import tempfile
@@ -57,7 +58,10 @@ def main():
             channel.update(level=sc.OFF if number % 5 == 4 else -30 * (number % 4) - 30, muted=number % 7 == 6)
 
     def report(channel, what):
-        value = ("muted" if channel["muted"] else "unmuted") if what == sc.MUTE else str(channel["level"])
+        if what == sc.PHANTOM:
+            value = "48V on" if channel["phantom"] else "48V off"
+        else:
+            value = ("muted" if channel["muted"] else "unmuted") if what == sc.MUTE else str(channel["level"])
         print("SET %s %s" % (channel["name"], value), flush=True)
 
     core.on_set = report
@@ -77,6 +81,12 @@ def main():
                 time.sleep(0.002)
 
     threading.Thread(target=core.serve, args=(read, write), daemon=True).start()
+    for _ in range(200):  # "ready" means the bridge is answering, not just started
+        try:
+            socket.create_connection(("127.0.0.1", PORT), timeout=1).close()
+            break
+        except OSError:
+            time.sleep(0.05)
     print("READY http://127.0.0.1:%d PIN %s" % (PORT, PIN), flush=True)
     try:
         for line in sys.stdin:

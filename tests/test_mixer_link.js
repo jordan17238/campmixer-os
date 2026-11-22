@@ -17,8 +17,16 @@ for (const v of vectors.to_core.slice(1)) assert.strictEqual(hex(L.set(v.channel
 // --- what the app understands
 assert.deepStrictEqual(L.decode(unhex(vectors.info.hex)), { type: 'info', version: 2, inputs: 4, outputs: 1 });
 for (const v of vectors.channels) {
-  assert.deepStrictEqual(L.decode(unhex(v.hex)), { type: 'channel', channel: v.channel, level: v.level, muted: v.muted, name: v.name }, v.name);
+  assert.deepStrictEqual(L.decode(unhex(v.hex)),
+    { type: 'channel', channel: v.channel, level: v.level, muted: v.muted, phantomSwitch: v.phantom_switch, phantom: v.phantom, name: v.name }, v.name);
 }
+// A CHANNEL's flags: bit 0 is mute, bit 2 says the channel has a 48 V switch, bit 1 that the 48 V is on. A channel
+// with no switch is never shown as powered, whatever bit 1 says, and the unit number in bits 4 to 7 changes nothing.
+for (let flags = 0; flags < 256; flags++) {
+  const got = L.decode(new Uint8Array([0x84, 3, 0, 0, flags, 1, 0x41]));
+  assert.deepStrictEqual([got.muted, got.phantomSwitch, got.phantom], [(flags & 1) === 1, (flags & 4) === 4, (flags & 6) === 6], 'flags ' + flags);
+}
+assert.strictEqual(L.PHANTOM, 4);
 const meters = L.decode(unhex(vectors.meters.hex));
 assert.deepStrictEqual(meters, { type: 'meters', peaks: vectors.meters.peaks.map(p => p === null ? -Infinity : p) });
 // A slice of a larger buffer (how a browser may hand it over) reads the same.
@@ -53,6 +61,7 @@ for (let n = 0; n < 20000; n++){
   const got = L.decode(bytes);                       // must not throw, whatever arrives
   if (got && got.type === 'info' && got.version === 2) assert.ok(got.inputs >= 1 && got.outputs >= 1 && got.inputs + got.outputs <= 250);
   if (got && got.type === 'channel') assert.ok(typeof got.name === 'string' && Number.isInteger(got.level) && typeof got.muted === 'boolean');
+  if (got && got.type === 'channel') assert.ok(typeof got.phantomSwitch === 'boolean' && typeof got.phantom === 'boolean' && (got.phantomSwitch || !got.phantom));
 }
 // A core that speaks another version is reported as such, with no attempt to read the rest.
 assert.deepStrictEqual(L.decode(new Uint8Array([0x83, 3, 4, 1, 9, 9])), { type: 'info', version: 3, inputs: 0, outputs: 0 });
@@ -140,6 +149,27 @@ core.receive(L.set(0, 77, 0));                       // no such setting
 core.receive(new Uint8Array([L.SET, 0, 1]));         // cut short
 core.receive(new Uint8Array([0x55]));
 assert.strictEqual(heard.length, before);
+// 48 V: every input has the switch and starts with it off; the output has none. On and off are said outright.
+core.receive(L.getState());
+assert.deepStrictEqual(heard.slice(-5).map(m => [m.phantomSwitch, m.phantom]), [[true, false], [true, false], [true, false], [true, false], [false, false]]);
+core.receive(L.set(1, L.PHANTOM, 1));
+assert.deepStrictEqual([latest().channel, latest().phantom, latest().muted, latest().level], [1, true, false, L.OFF]);   // and nothing else about it moved
+core.receive(L.set(1, L.PHANTOM, 1));                // asked again: still on, not flipped back
+assert.strictEqual(latest().phantom, true);
+core.receive(L.set(1, L.PHANTOM, 0));
+assert.deepStrictEqual([latest().channel, latest().phantom], [1, false]);
+core.receive(L.set(0, L.PHANTOM, -3));               // anything but 0 is on
+assert.deepStrictEqual([latest().channel, latest().phantom], [0, true]);
+core.receive(L.set(0, L.MUTE, 1));
+assert.deepStrictEqual([latest().muted, latest().phantom], [true, true]);   // muting leaves the 48 V alone
+core.receive(L.set(0, L.MUTE, 0));
+core.receive(L.set(0, L.PHANTOM, 0));
+const quiet = heard.length;
+core.receive(L.set(4, L.PHANTOM, 1));                // the output has no 48 V switch: nothing, and no answer
+core.receive(L.set(0, 3, 1));                        // gain is not in this version
+assert.strictEqual(heard.length, quiet);
+core.receive(L.getState());
+assert.ok(heard.slice(-5).every(m => m.phantom === false), 'a 48 V was left on');
 core.receive(L.set(4, L.LEVEL, 0));
 heard.length = 0;
 for (let n = 0; n < 200; n++) core.meters();
@@ -163,6 +193,7 @@ for (const [ins, outs] of [[48, 8], [1, 1], [200, 50], [16, 2]]) {
   assert.strictEqual(said.length, 1 + ins + outs);
   assert.deepStrictEqual(said.slice(1).map(m => m.channel), Array.from({ length: ins + outs }, (_, n) => n));
   assert.ok(said.slice(1).every(m => m.name.length >= 1 && m.name.length <= 16));
+  assert.ok(said.slice(1).every(m => m.phantomSwitch === (m.channel < ins) && !m.phantom), 'the 48 V switches are not on the inputs alone');
   big.receive(L.set(ins + outs - 1, L.LEVEL, -45));  // the last output
   assert.deepStrictEqual([said[said.length - 1].channel, said[said.length - 1].level], [ins + outs - 1, -45]);
   big.receive(L.set(ins + outs, L.LEVEL, 0));        // one past the end: nothing
